@@ -2,7 +2,7 @@
   "name": "tizenvless",
   "version": "0.1.0",
   "description": "Local HTTP proxy on the TV that tunnels traffic through VLESS over WebSocket (TLS)",
-  "main": "service.js",
+  "main": "app/main.js",
   "packageType": "app",
   "appName": "TizenVLESS",
   "appPath": "app/index.html",

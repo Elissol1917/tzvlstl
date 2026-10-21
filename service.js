@@ -344,6 +344,7 @@ function startSetup() {
   function form(msg) {
     return '<h2>TizenVLESS</h2>' + (msg ? '<p><b>' + msg + '</b></p>' : '') +
       '<p>VPN: ' + status.vpn + '<br>Хранится: ' + status.saved + '</p>' +
+      '<p>Диагностика (ok = порт занят успешно):</p><pre>' + JSON.stringify(status, null, 1) + '</pre>' +
       '<form method="POST" action="/save"><p>Вставьте ссылку vless:// (ws + tls):</p>' +
       '<textarea name="link" rows="6" style="width:100%"></textarea><p><button style="font-size:20px;padding:8px 20px">Сохранить</button></p></form>';
   }
