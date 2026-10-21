@@ -1,0 +1,15 @@
+{
+  "server": "",
+  "serverIp": "",
+  "port": 443,
+  "uuid": "",
+  "tls": true,
+  "sni": "",
+  "host": "",
+  "path": "/",
+  "allowInsecure": false,
+  "listen": 8080,
+  "setupPort": 8090,
+  "domains": ["youtube.com", "youtu.be", "youtube-nocookie.com", "googlevideo.com", "ytimg.com", "ggpht.com", "googleapis.com", "gstatic.com", "google.com", "googleusercontent.com"],
+  "upstreamDns": ["8.8.8.8", "1.1.1.1"]
+}

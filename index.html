@@ -1,0 +1,24 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>TizenVLESS</title>
+<style>body{background:#111;color:#eee;font:34px sans-serif;padding:60px}
+.ok{color:#6f6}.bad{color:#f66}td{padding:6px 30px 6px 0}</style></head>
+<body>
+<h1>TizenVLESS: диагностика</h1>
+<table id="t"><tr><td>Загрузка...</td></tr></table>
+<p style="font-size:26px;color:#aaa">Ссылку VPN вставьте с телефона: откройте в браузере http://IP_ТВ:8090 (телефон в той же Wi-Fi).<br>ok = порт занят успешно. EACCES = ТВ не разрешил порт (нужен другой путь).<br>Если ничего не появилось, служба не запущена.</p>
+<script>
+function load(){
+  var x=new XMLHttpRequest();
+  x.open('GET','http://127.0.0.1:8080/');
+  x.onload=function(){
+    var s=JSON.parse(x.responseText),h='',k;
+    var names={dns:'DNS (порт 53)',https:'HTTPS (порт 443)',http:'HTTP (порт 80)',proxy:'Прокси (порт 8080)',setup:'Страница настройки (порт 8090)',vpn:'VPN',saved:'Где хранится'};
+    for(k in names){h+='<tr><td>'+names[k]+'</td><td class="'+((s[k]==='ok'||s[k]==='configured'||k==='saved')?'ok':'bad')+'">'+s[k]+'</td></tr>';}
+    document.getElementById('t').innerHTML=h;
+  };
+  x.onerror=function(){document.getElementById('t').innerHTML='<tr><td class="bad">Служба не отвечает</td></tr>';};
+  x.send();
+}
+load();setInterval(load,3000);
+</script>
+</body></html>
