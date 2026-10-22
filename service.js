@@ -27,11 +27,11 @@ var cfg = {
     'googleapis.com', 'gstatic.com', 'google.com', 'googleusercontent.com'],
   upstreamDns: ['8.8.8.8', '1.1.1.1']
 };
-var status = { version: '0.3.5', web: 'starting', relay: 'starting', dns: 'off', https: 'off', http: 'off', setup: 'starting', vpn: 'not configured', saved: '-', mode: 'local', answerIp: '127.0.0.1', lanIps: [] };
+var status = { version: '0.3.6', web: 'starting', relay: 'starting', dns: 'off', https: 'off', http: 'off', setup: 'starting', vpn: 'not configured', saved: '-', mode: 'local', answerIp: '127.0.0.1', lanIps: [] };
 var handles = [];
 var started = false;
 // Ports actually bound (may differ from cfg.* if the preferred one was busy).
-var VERSION = '0.3.5';
+var VERSION = '0.3.6';
 var ports = { setup: 0, relay: 0, web: 0 };
 var PORT_TRIES = 30;
 
@@ -511,6 +511,15 @@ function rewriteText(s, hostport) {
   });
 }
 
+// Reverse of rewriteText for request bodies: turn proxy URLs back into the real https:// ones
+// (page scripts sometimes build values such as OAuth scopes out of an already-rewritten base URL).
+function unrewrite(s, hostport) {
+  var plain = 'http://' + hostport + '/__h/';
+  var esc = 'http:\\/\\/' + hostport + '\\/__h\\/';
+  var enc = encodeURIComponent(plain);
+  return s.split(plain).join('https://').split(esc).join('https:\\/\\/').split(enc).join(encodeURIComponent('https://'));
+}
+
 function toUpstream(u, base) {
   if (u.indexOf(base) !== 0) return u;
   var rest = u.slice(base.length);
@@ -531,8 +540,9 @@ function fixCookie(c) {
 var CLIENT_PATCH = '(function(){try{' +
   'var DOMS=__DOMS__,B=location.protocol+"//"+location.host;' +
   'var RN=0;function rep(m){try{if(RN++>80)return;var im=new Image();im.src=B+"/__clog?m="+encodeURIComponent(String(m).slice(0,300));}catch(e){}}' +
-  'window.addEventListener("error",function(e){rep("js "+e.message+" @"+String(e.filename||"").slice(-50)+":"+e.lineno);});' +
-  'window.addEventListener("unhandledrejection",function(e){var r=e.reason;rep("rej "+(r&&r.message?r.message:r));});' +
+  'function S(x){try{var j=JSON.stringify(x);if(j&&j!=="{}")return j.slice(0,200);}catch(e){}return String(x&&x.message?x.message:x).slice(0,200);}' +
+  'window.addEventListener("error",function(e){rep("js "+e.message+" @"+String(e.filename||"").slice(-50)+":"+e.lineno+" err="+S(e.error));});' +
+  'window.addEventListener("unhandledrejection",function(e){rep("rej "+S(e.reason));});' +
   'document.addEventListener("error",function(e){var t=e.target;if(t&&(t.tagName==="VIDEO"||t.tagName==="AUDIO")){rep("media err "+(t.error?t.error.code+" "+(t.error.message||""):"?")+" "+String(t.currentSrc||t.src||"").slice(0,100));}},true);' +
   'function ok(h){h=String(h).toLowerCase();for(var i=0;i<DOMS.length;i++){var d=DOMS[i];if(h===d||h.slice(-d.length-1)==="."+d)return true;}return false;}' +
   'function rw(u){if(typeof u!=="string")return u;var m=u.match(/^(?:https?:)?\\/\\/([^\\/?#:]+)(?::\\d+)?([\\s\\S]*)$/i);' +
@@ -640,13 +650,9 @@ function handleWeb(req, res) {
           log('web PLAYER-URLS gv=' + (text.match(/googlevideo\.com/g) || []).length, 'cipher=' + /signatureCipher/.test(text), 'sabr=' + /serverAbrStreamingUrl/.test(text), 'first=' + (gv ? gv[0] : '-'));
         }
       } catch (e) {}
-      text = rewriteText(text, hostport);
-      try {
-        if (/^\/youtubei\/v1\/player/.test(path)) {
-          var gv2 = text.match(/\/__h\/[a-z0-9.-]*googlevideo\.com[^"\s]{0,70}/i);
-          log('web PLAYER-REWRITTEN first=' + (gv2 ? gv2[0] : '-'));
-        }
-      } catch (e) {}
+      // Player responses keep their original googlevideo URLs: the player validates the host, and the
+      // client patch (fetch/XHR/src) already sends those requests through this proxy.
+      if (!/^\/youtubei\/v1\/player/.test(path)) text = rewriteText(text, hostport);
       if (/text\/html/i.test(ct)) text = fixHtml(text);
       var out = bFromStr(text, 'utf8');
       delete rh['content-encoding']; delete rh['content-length'];
@@ -663,12 +669,21 @@ function handleWeb(req, res) {
   up.setTimeout(45000, function () { up.abort(); });
   up.on('error', function (e) { log('web upstream error:', host, e.message); webError(res, 502, 'Нет связи с ' + host + ' через VPN: ' + e.message); });
   res.on('close', function () { try { up.abort(); } catch (e) {} });
-  if (req.method === 'POST' && /^\/o\/oauth2\/device\/code/.test(path)) {
-    var rb = '';
-    req.on('data', function (d) { if (rb.length < 400) rb += d.toString('utf8'); });
-    req.on('end', function () { log('web REQBODY device/code', rb.slice(0, 400)); });
+  if (req.method === 'POST' && /^\/o\/oauth2\//.test(path)) {
+    // small form/JSON bodies: buffer, undo URL rewriting, then forward with the new length
+    var bchunks = [];
+    req.on('data', function (d) { bchunks.push(d); });
+    req.on('end', function () {
+      var raw = Buffer.concat(bchunks).toString('utf8');
+      var fixed = unrewrite(raw, hostport);
+      log('web REQBODY ' + path.slice(0, 30) + (fixed !== raw ? ' (url-fixed)' : ''), fixed.slice(0, 300));
+      var ob = bFromStr(fixed, 'utf8');
+      try { up.setHeader('content-length', ob.length); } catch (e) {}
+      up.end(ob);
+    });
+  } else {
+    req.pipe(up);
   }
-  req.pipe(up);
 }
 
 function startWeb() {
