@@ -27,11 +27,11 @@ var cfg = {
     'googleapis.com', 'gstatic.com', 'google.com', 'googleusercontent.com'],
   upstreamDns: ['8.8.8.8', '1.1.1.1']
 };
-var status = { version: '0.3.10', web: 'starting', relay: 'starting', dns: 'off', https: 'off', http: 'off', setup: 'starting', vpn: 'not configured', saved: '-', mode: 'local', answerIp: '127.0.0.1', lanIps: [] };
+var status = { version: '0.3.11', web: 'starting', relay: 'starting', dns: 'off', https: 'off', http: 'off', setup: 'starting', vpn: 'not configured', saved: '-', mode: 'local', answerIp: '127.0.0.1', lanIps: [] };
 var handles = [];
 var started = false;
 // Ports actually bound (may differ from cfg.* if the preferred one was busy).
-var VERSION = '0.3.10';
+var VERSION = '0.3.11';
 var ports = { setup: 0, relay: 0, web: 0 };
 var PORT_TRIES = 30;
 
@@ -548,6 +548,20 @@ var CLIENT_PATCH = '(function(){try{' +
   'function rw(u){if(typeof u!=="string")return u;var m=u.match(/^(?:https?:)?\\/\\/([^\\/?#:]+)(?::\\d+)?([\\s\\S]*)$/i);' +
   'if(m&&ok(m[1])){var r=m[2]||"/";if(r.charAt(0)!=="/")r="/"+r;return B+"/__h/"+m[1].toLowerCase()+r;}return u;}' +
   'function rwt(s){return String(s).replace(/(https?:)?\\/\\/((?:[a-zA-Z0-9-]+\\.)+[a-zA-Z]{2,})/g,function(a,p,h){return ok(h)?B+"/__h/"+h.toLowerCase():a;});}' +
+  // YouTube TV paints a debug bar ("NO DEBUG ACCESS DOMAIN=127.0.0.1 ...") on any non-youtube.com origin.
+  // Its markup is not known, so find it by text and hide the smallest box that holds only that text.
+  'var BH=0,bt=0;function big(e){return (e.textContent||"").length>300||e.getBoundingClientRect().height>window.innerHeight*0.2;}' +
+  'function hideBanner(){try{if(!document.body)return;' +
+  'var w=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT,null,false);var n;' +
+  'while((n=w.nextNode())){if(!n.nodeValue||n.nodeValue.indexOf("NO DEBUG ACCESS")<0)continue;' +
+  'var el=n.parentNode;if(!el||(el.closest&&el.closest("[data-tv-hid]")))continue;' +
+  'if(big(el)){n.nodeValue="";if(BH++<3)rep("banner text cleared in big <"+el.tagName+">");continue;}' +
+  'while(el.parentNode&&el.parentNode!==document.body&&el.parentNode!==document.documentElement&&!big(el.parentNode)){el=el.parentNode;}' +
+  'el.setAttribute("data-tv-hid","1");el.style.setProperty("display","none","important");' +
+  'if(BH++<3)rep("banner hidden <"+el.tagName+" class="+String(el.className).slice(0,60)+"> txt="+String(el.textContent).slice(0,50));}}catch(e){}}' +
+  'function schedBanner(){if(bt)return;bt=setTimeout(function(){bt=0;hideBanner();},500);}' +
+  'try{new MutationObserver(schedBanner).observe(document.documentElement,{childList:true,subtree:true});}catch(e){}' +
+  'try{setInterval(hideBanner,2000);}catch(e){}' +
   'var of=window.fetch;' +
   // A Request object cannot simply be re-created with new Request(url, oldRequest): old Chromium has no readable
   // Request.body, so POST bodies (e.g. SABR protobuf) were lost. Read the body explicitly instead.
