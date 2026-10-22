@@ -4,25 +4,43 @@
 <body>
 <h1>TizenVLESS</h1>
 <p id="s">Запуск службы...</p>
-<p><small>Настройка VPN: на телефоне откройте http://IP_ТВ:8090</small></p>
+<p><small id="hint">Настройка VPN: на телефоне откройте http://IP_ТВ:8090</small></p>
 <script>
-var n = 0;
+// The service walks up from 8090 if a port is busy, so look for it in a small range.
+var BASE = 8090, SPAN = 30;
+var n = 0, idx = 0, found = 0;
 function st(t) { document.getElementById('s').innerHTML = t; }
-function go() {
+function hint(p) { document.getElementById('hint').innerHTML = 'Настройка VPN: на телефоне откройте http://IP_ТВ:' + p; }
+
+function probe(port, ok, fail) {
   var x = new XMLHttpRequest();
-  x.open('GET', 'http://127.0.0.1:8090/status.json');
-  x.timeout = 2500;
+  x.open('GET', 'http://127.0.0.1:' + port + '/status.json');
+  x.timeout = 1500;
   x.onload = function () {
-    var s = {};
+    var s = null;
     try { s = JSON.parse(x.responseText); } catch (e) {}
-    if (s.vpn !== 'configured') { st('VPN не настроен. Откройте на телефоне http://IP_ТВ:8090 и вставьте ссылку vless://'); setTimeout(go, 3000); return; }
-    if (s.web !== 'ok' || s.relay !== 'ok') { st('Служба: web=' + s.web + ', relay=' + s.relay); setTimeout(go, 2000); return; }
-    st('Открываю YouTube...');
-    location.href = 'http://127.0.0.1:8095/tv';
+    // only our service answers with these fields
+    if (s && typeof s === 'object' && s.relay !== undefined && s.vpn !== undefined) ok(s); else fail();
   };
-  x.onerror = x.ontimeout = function () { n++; st('Жду службу... ' + n); setTimeout(go, 1000); };
+  x.onerror = x.ontimeout = fail;
   x.send();
 }
-go();
+
+function find() {
+  if (found) { poll(); return; }
+  if (idx >= SPAN) { idx = 0; n++; st('Жду службу... ' + n); setTimeout(find, 1000); return; }
+  var p = BASE + idx;
+  probe(p, function () { found = p; hint(p); poll(); }, function () { idx++; find(); });
+}
+
+function poll() {
+  probe(found, function (s) {
+    if (s.vpn !== 'configured') { st('VPN не настроен. Откройте на телефоне http://IP_ТВ:' + found + ' и вставьте ссылку vless://'); setTimeout(poll, 3000); return; }
+    if (s.web !== 'ok' || s.relay !== 'ok') { st('Служба: web=' + s.web + ', relay=' + s.relay); setTimeout(poll, 2000); return; }
+    st('Открываю YouTube...');
+    location.href = 'http://127.0.0.1:' + (s.webPort || 8095) + '/tv';
+  }, function () { found = 0; idx = 0; st('Жду службу...'); setTimeout(find, 1000); });
+}
+find();
 </script>
 </body></html>

@@ -30,11 +30,44 @@ var cfg = {
 var status = { web: 'starting', relay: 'starting', dns: 'off', https: 'off', http: 'off', setup: 'starting', vpn: 'not configured', saved: '-', mode: 'local', answerIp: '127.0.0.1', lanIps: [] };
 var handles = [];
 var started = false;
+// Ports actually bound (may differ from cfg.* if the preferred one was busy).
+var ports = { setup: 0, relay: 0, web: 0 };
+var PORT_TRIES = 30;
 
 function log() {
   try { if (typeof console !== 'undefined') console.log.apply(console, ['[tizenvless]'].concat([].slice.call(arguments))); } catch (e) {}
 }
 function merge(a, b) { for (var k in b) { if (Object.prototype.hasOwnProperty.call(b, k)) a[k] = b[k]; } return a; }
+
+// Listen on `base`; if the port is busy (EADDRINUSE/EACCES) try base+1, base+2, ... up to PORT_TRIES.
+// A fresh server is created for every attempt (make() returns it), so a failed listen leaves no state behind.
+// onBound(port, server) on success, onFail(err) when every port is taken or on any other error.
+function listenScan(make, base, host, label, onBound, onFail) {
+  var tries = 0;
+  function attempt(port) {
+    var srv = make();
+    var settled = false;
+    srv.once('error', function (e) {
+      if (settled) return;
+      settled = true;
+      try { srv.close(); } catch (x) {}
+      if ((e.code === 'EADDRINUSE' || e.code === 'EACCES') && tries < PORT_TRIES && port < 65535) {
+        log(label + ': port ' + port + ' busy (' + e.code + '), trying ' + (port + 1));
+        tries++;
+        attempt(port + 1);
+      } else {
+        onFail(e, port);
+      }
+    });
+    srv.listen(port, host, function () {
+      settled = true;
+      srv.on('error', function (e) { log(label + ' runtime error:', e.message); });
+      handles.push(srv);
+      onBound(port, srv);
+    });
+  }
+  attempt(base);
+}
 
 // ---- Buffer helpers (work on old Node too) ----
 function bAlloc(n) { if (Buffer.alloc) return Buffer.alloc(n); var b = new Buffer(n); b.fill(0); return b; }
@@ -293,7 +326,7 @@ function startSetup() {
       '<form method="POST" action="/save"><p>Вставьте ссылку vless:// (ws + tls):</p>' +
       '<textarea name="link" rows="6" style="width:100%"></textarea><p><button style="font-size:20px;padding:8px 20px">Сохранить</button></p></form>';
   }
-  var srv = http.createServer(function (req, res) {
+  function handler(req, res) {
     if (req.url === '/ping') { res.writeHead(200, { 'Access-Control-Allow-Origin': '*' }); res.end('ok'); return; }
     if (req.url === '/status.json') { res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }); res.end(JSON.stringify(status)); return; }
     if (req.method === 'POST' && req.url === '/save') {
@@ -309,10 +342,13 @@ function startSetup() {
       return;
     }
     send(res, 200, form(''));
-  });
-  srv.on('error', function (e) { status.setup = e.code || e.message; log('setup error:', e.message); });
-  srv.listen(cfg.setupPort || 8090, '0.0.0.0', function () { status.setup = 'ok'; log('setup page on port ' + (cfg.setupPort || 8090)); });
-  handles.push(srv);
+  }
+  listenScan(function () { return http.createServer(handler); }, cfg.setupPort || 8090, '0.0.0.0', 'setup', function (port) {
+    ports.setup = port;
+    status.setupPort = port;
+    status.setup = 'ok';
+    log('setup page on port ' + port);
+  }, function (e) { status.setup = e.code || e.message; log('setup error:', e.message); });
 }
 
 // ---- SNI / Host proxies on 443 / 80 ----
@@ -338,9 +374,11 @@ function parseSNI(buf) {
   return null;
 }
 
-function startSni(port, kind, bindAddr, keyName) {
+// scan=true: walk up from `port` if it is busy and report the bound port via onBound(port).
+// scan=false (443/80 for the DNS trick): the exact port or nothing.
+function startSni(port, kind, bindAddr, keyName, scan, onBound, onDone) {
   var key = keyName || (kind === 'tls' ? 'https' : 'http');
-  var srv = net.createServer(function (client) {
+  function conn(client) {
     client.on('error', function () {});
     var buf = bAlloc(0);
     function onData(chunk) {
@@ -362,10 +400,29 @@ function startSni(port, kind, bindAddr, keyName) {
       tunnel(host, kind === 'tls' ? 443 : 80, client, buf, null);
     }
     client.on('data', onData);
-  });
-  srv.on('error', function (e) { status[key] = e.code || e.message; log(key + ' bind error:', e.message); });
-  srv.listen(port, bindAddr || cfg.bindIp || '127.0.0.1', function () { status[key] = 'ok'; log(key + ' listening on ' + port); });
-  handles.push(srv);
+  }
+  var host = bindAddr || cfg.bindIp || '127.0.0.1';
+  function bound(p) {
+    status[key] = 'ok';
+    if (scan) status[key + 'Port'] = p;
+    log(key + ' listening on ' + p);
+    if (onBound) onBound(p);
+    if (onDone) onDone();
+  }
+  function failed(e) {
+    status[key] = e.code || e.message;
+    log(key + ' bind error:', e.message);
+    if (onDone) onDone();
+  }
+  if (scan) {
+    listenScan(function () { return net.createServer(conn); }, port, host, key, bound, failed);
+  } else {
+    // exact port: same machinery with a single try
+    var srv = net.createServer(conn);
+    srv.on('error', failed);
+    srv.listen(port, host, function () { bound(port); });
+    handles.push(srv);
+  }
 }
 
 // ---- DNS on 53 ----
@@ -495,9 +552,9 @@ function webError(res, code, msg) {
 }
 
 function handleWeb(req, res) {
-  var hostport = req.headers.host || ('127.0.0.1:' + (cfg.webPort || 8095));
+  var hostport = req.headers.host || ('127.0.0.1:' + (ports.web || cfg.webPort || 8095));
   var base = 'http://' + hostport;
-  if (!cfg.server || !cfg.uuid) { webError(res, 503, '<h2>VPN не настроен</h2><p>Откройте на телефоне http://IP_ТВ:' + (cfg.setupPort || 8090) + ' и вставьте ссылку vless://</p>'); return; }
+  if (!cfg.server || !cfg.uuid) { webError(res, 503, '<h2>VPN не настроен</h2><p>Откройте на телефоне http://IP_ТВ:' + (ports.setup || cfg.setupPort || 8090) + ' и вставьте ссылку vless://</p>'); return; }
   var host = 'www.youtube.com';
   var path = req.url;
   var m = req.url.match(/^\/__h\/([^\/?#]+)(.*)$/);
@@ -521,7 +578,7 @@ function handleWeb(req, res) {
   }
 
   var up = https.request({
-    host: '127.0.0.1', port: cfg.sniPort || 8443, servername: host, method: req.method, path: path,
+    host: '127.0.0.1', port: ports.relay || cfg.sniPort || 8443, servername: host, method: req.method, path: path,
     headers: h, agent: agentFor(host), rejectUnauthorized: !cfg.upstreamInsecure
   }, function (ur) {
     var rh = {};
@@ -568,10 +625,12 @@ function handleWeb(req, res) {
 }
 
 function startWeb() {
-  var srv = http.createServer(handleWeb);
-  srv.on('error', function (e) { status.web = e.code || e.message; log('web error:', e.message); });
-  srv.listen(cfg.webPort || 8095, '127.0.0.1', function () { status.web = 'ok'; log('web proxy on 127.0.0.1:' + (cfg.webPort || 8095)); });
-  handles.push(srv);
+  listenScan(function () { return http.createServer(handleWeb); }, cfg.webPort || 8095, '127.0.0.1', 'web', function (port) {
+    ports.web = port;
+    status.webPort = port;
+    status.web = 'ok';
+    log('web proxy on 127.0.0.1:' + port);
+  }, function (e) { status.web = e.code || e.message; log('web error:', e.message); });
 }
 
 // ---- lifecycle ----
@@ -582,18 +641,27 @@ function start() {
   started = true;
   safe('config', loadCfg);
   safe('setup', startSetup);
-  safe('relay', function () { startSni(cfg.sniPort || 8443, 'tls', '127.0.0.1', 'relay'); });
-  safe('web', startWeb);
+  // Relay goes first: web needs to know which port the relay really got.
+  var webStarted = false;
+  function webOnce() { if (webStarted) return; webStarted = true; safe('web', startWeb); }
+  try {
+    startSni(cfg.sniPort || 8443, 'tls', '127.0.0.1', 'relay', true, function (p) { ports.relay = p; }, webOnce);
+  } catch (e) {
+    status.relay = 'error: ' + e.message;
+    log('relay failed:', e.message);
+    webOnce();
+  }
   if (cfg.lan || cfg.privileged) {
     safe('dns', startDns);
-    safe('https', function () { startSni(cfg.httpsPort || 443, 'tls'); });
-    safe('http', function () { startSni(cfg.httpPort || 80, 'http'); });
+    safe('https', function () { startSni(cfg.httpsPort || 443, 'tls', null, null, false); });
+    safe('http', function () { startSni(cfg.httpPort || 80, 'http', null, null, false); });
   }
 }
 
 function stop() {
   for (var i = 0; i < handles.length; i++) { try { handles[i].close(); } catch (e) {} }
   handles = [];
+  ports = { setup: 0, relay: 0, web: 0 };
   started = false;
 }
 
