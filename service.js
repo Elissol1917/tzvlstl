@@ -27,10 +27,11 @@ var cfg = {
     'googleapis.com', 'gstatic.com', 'google.com', 'googleusercontent.com'],
   upstreamDns: ['8.8.8.8', '1.1.1.1']
 };
-var status = { web: 'starting', relay: 'starting', dns: 'off', https: 'off', http: 'off', setup: 'starting', vpn: 'not configured', saved: '-', mode: 'local', answerIp: '127.0.0.1', lanIps: [] };
+var status = { version: '0.3.2', web: 'starting', relay: 'starting', dns: 'off', https: 'off', http: 'off', setup: 'starting', vpn: 'not configured', saved: '-', mode: 'local', answerIp: '127.0.0.1', lanIps: [] };
 var handles = [];
 var started = false;
 // Ports actually bound (may differ from cfg.* if the preferred one was busy).
+var VERSION = '0.3.2';
 var ports = { setup: 0, relay: 0, web: 0 };
 var PORT_TRIES = 30;
 
@@ -51,8 +52,9 @@ function listenScan(make, base, host, label, onBound, onFail) {
       if (settled) return;
       settled = true;
       try { srv.close(); } catch (x) {}
-      if ((e.code === 'EADDRINUSE' || e.code === 'EACCES') && tries < PORT_TRIES && port < 65535) {
-        log(label + ': port ' + port + ' busy (' + e.code + '), trying ' + (port + 1));
+      var txt = String((e && (e.code || e.errno)) || '') + ' ' + String((e && e.message) || '');
+      if (/EADDRINUSE|EACCES|address already in use/i.test(txt) && tries < PORT_TRIES && port < 65535) {
+        log(label + ': port ' + port + ' busy (' + txt.trim() + '), trying ' + (port + 1));
         tries++;
         attempt(port + 1);
       } else {
