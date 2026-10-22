@@ -27,11 +27,11 @@ var cfg = {
     'googleapis.com', 'gstatic.com', 'google.com', 'googleusercontent.com'],
   upstreamDns: ['8.8.8.8', '1.1.1.1']
 };
-var status = { version: '0.3.9', web: 'starting', relay: 'starting', dns: 'off', https: 'off', http: 'off', setup: 'starting', vpn: 'not configured', saved: '-', mode: 'local', answerIp: '127.0.0.1', lanIps: [] };
+var status = { version: '0.3.10', web: 'starting', relay: 'starting', dns: 'off', https: 'off', http: 'off', setup: 'starting', vpn: 'not configured', saved: '-', mode: 'local', answerIp: '127.0.0.1', lanIps: [] };
 var handles = [];
 var started = false;
 // Ports actually bound (may differ from cfg.* if the preferred one was busy).
-var VERSION = '0.3.9';
+var VERSION = '0.3.10';
 var ports = { setup: 0, relay: 0, web: 0 };
 var PORT_TRIES = 30;
 
@@ -548,8 +548,18 @@ var CLIENT_PATCH = '(function(){try{' +
   'function rw(u){if(typeof u!=="string")return u;var m=u.match(/^(?:https?:)?\\/\\/([^\\/?#:]+)(?::\\d+)?([\\s\\S]*)$/i);' +
   'if(m&&ok(m[1])){var r=m[2]||"/";if(r.charAt(0)!=="/")r="/"+r;return B+"/__h/"+m[1].toLowerCase()+r;}return u;}' +
   'function rwt(s){return String(s).replace(/(https?:)?\\/\\/((?:[a-zA-Z0-9-]+\\.)+[a-zA-Z]{2,})/g,function(a,p,h){return ok(h)?B+"/__h/"+h.toLowerCase():a;});}' +
-  'var of=window.fetch;if(of){window.fetch=function(i,n){if(typeof i==="string"){i=rw(i);}' +
-  'else if(i&&typeof i.url==="string"){var nu=rw(i.url);if(nu!==i.url){i=new Request(nu,i);}}' +
+  'var of=window.fetch;' +
+  // A Request object cannot simply be re-created with new Request(url, oldRequest): old Chromium has no readable
+  // Request.body, so POST bodies (e.g. SABR protobuf) were lost. Read the body explicitly instead.
+  'function rfetch(rq,nu,n){var m=rq.method||"GET";var hasBody=!(m==="GET"||m==="HEAD");' +
+  'var init={method:m,headers:rq.headers,credentials:rq.credentials,cache:rq.cache,redirect:rq.redirect,mode:"cors"};' +
+  'try{if(rq.signal)init.signal=rq.signal;}catch(e){}' +
+  'if(n){for(var k in n){init[k]=n[k];}}' +
+  'var gv=/googlevideo/.test(nu);' +
+  'if(!hasBody||(n&&n.body!==undefined)){if(gv)rep("fetch(req) "+m+" nobody-read");return of.call(window,nu,init);}' +
+  'return rq.arrayBuffer().then(function(buf){init.body=buf;if(gv)rep("fetch(req) "+m+" bodylen="+buf.byteLength);return of.call(window,nu,init);});}' +
+  'if(of){window.fetch=function(i,n){if(typeof i==="string"){i=rw(i);}' +
+  'else if(i&&typeof i.url==="string"){var nu=rw(i.url);if(nu!==i.url){return rfetch(i,nu,n);}}' +
   'else if(i&&typeof i.href==="string"){i=rw(i.href);}' +
   'var u0=typeof i==="string"?i:(i&&i.url)||"";if(/googlevideo/.test(u0))rep("fetch "+String(u0).slice(0,120));' +
   'var pr=of.call(this,i,n);try{pr.then(function(r){if(/googlevideo/.test(u0))rep("fetch ok "+r.status+" "+(r.headers&&r.headers.get?r.headers.get("content-type"):""));},function(e){rep("fetch fail "+String(u0).slice(0,80)+" "+e);});}catch(x){}return pr;};}' +
