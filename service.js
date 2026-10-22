@@ -27,11 +27,11 @@ var cfg = {
     'googleapis.com', 'gstatic.com', 'google.com', 'googleusercontent.com'],
   upstreamDns: ['8.8.8.8', '1.1.1.1']
 };
-var status = { version: '0.3.6', web: 'starting', relay: 'starting', dns: 'off', https: 'off', http: 'off', setup: 'starting', vpn: 'not configured', saved: '-', mode: 'local', answerIp: '127.0.0.1', lanIps: [] };
+var status = { version: '0.3.8', web: 'starting', relay: 'starting', dns: 'off', https: 'off', http: 'off', setup: 'starting', vpn: 'not configured', saved: '-', mode: 'local', answerIp: '127.0.0.1', lanIps: [] };
 var handles = [];
 var started = false;
 // Ports actually bound (may differ from cfg.* if the preferred one was busy).
-var VERSION = '0.3.6';
+var VERSION = '0.3.8';
 var ports = { setup: 0, relay: 0, web: 0 };
 var PORT_TRIES = 30;
 
@@ -552,7 +552,7 @@ var CLIENT_PATCH = '(function(){try{' +
   'else if(i&&typeof i.url==="string"){var nu=rw(i.url);if(nu!==i.url){i=new Request(nu,i);}}' +
   'else if(i&&typeof i.href==="string"){i=rw(i.href);}' +
   'var u0=typeof i==="string"?i:(i&&i.url)||"";if(/googlevideo/.test(u0))rep("fetch "+String(u0).slice(0,120));' +
-  'var pr=of.call(this,i,n);try{pr.then(null,function(e){rep("fetch fail "+String(u0).slice(0,80)+" "+e);});}catch(x){}return pr;};}' +
+  'var pr=of.call(this,i,n);try{pr.then(function(r){if(/googlevideo/.test(u0))rep("fetch ok "+r.status+" "+(r.headers&&r.headers.get?r.headers.get("content-type"):""));},function(e){rep("fetch fail "+String(u0).slice(0,80)+" "+e);});}catch(x){}return pr;};}' +
   'var xo=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(){var a=[].slice.call(arguments);a[1]=rw(String(a[1]));if(/googlevideo/.test(a[1]))rep("xhr "+String(a[1]).slice(0,120));return xo.apply(this,a);};' +
   'function pp(proto,prop){try{var d=Object.getOwnPropertyDescriptor(proto,prop);if(!d||!d.set)return;' +
   'Object.defineProperty(proto,prop,{configurable:true,enumerable:d.enumerable,get:d.get,set:function(v){d.set.call(this,rw(String(v)));}});}catch(e){}}' +
@@ -629,6 +629,12 @@ function handleWeb(req, res) {
     var enc = String(ur.headers['content-encoding'] || '').toLowerCase();
     var plainEnc = (!enc || enc === 'identity' || enc === 'gzip' || enc === 'deflate');
     if (!TEXT_RE.test(ct) || !plainEnc || ur.statusCode === 206 || ur.statusCode === 204 || ur.statusCode === 304) {
+      if (/googlevideo\.com$/.test(host) && /^\/videoplayback/.test(path)) {
+        var nb = 0;
+        ur.on('data', function (d) { nb += d.length; });
+        ur.on('end', function () { log('web GV done', req.method, ur.statusCode, ct.slice(0, 40), 'bytes=' + nb, 'cl=' + (ur.headers['content-length'] || '-')); });
+        ur.on('aborted', function () { log('web GV aborted after', nb, 'bytes'); });
+      }
       res.writeHead(ur.statusCode, rh);
       ur.pipe(res);
       return;
@@ -676,7 +682,9 @@ function handleWeb(req, res) {
     req.on('end', function () {
       var raw = Buffer.concat(bchunks).toString('utf8');
       var fixed = unrewrite(raw, hostport);
-      log('web REQBODY ' + path.slice(0, 30) + (fixed !== raw ? ' (url-fixed)' : ''), fixed.slice(0, 300));
+      // Never log token/refresh_token/client_secret bodies: /log is readable from the LAN.
+      if (/^\/o\/oauth2\/device\/code/.test(path)) log('web REQBODY device/code' + (fixed !== raw ? ' (url-fixed)' : ''), fixed.slice(0, 300));
+      else log('web REQBODY ' + path.slice(0, 30) + ' (' + fixed.length + ' bytes, not logged)' + (fixed !== raw ? ' (url-fixed)' : ''));
       var ob = bFromStr(fixed, 'utf8');
       try { up.setHeader('content-length', ob.length); } catch (e) {}
       up.end(ob);
