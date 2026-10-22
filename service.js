@@ -27,11 +27,11 @@ var cfg = {
     'googleapis.com', 'gstatic.com', 'google.com', 'googleusercontent.com'],
   upstreamDns: ['8.8.8.8', '1.1.1.1']
 };
-var status = { version: '0.3.3', web: 'starting', relay: 'starting', dns: 'off', https: 'off', http: 'off', setup: 'starting', vpn: 'not configured', saved: '-', mode: 'local', answerIp: '127.0.0.1', lanIps: [] };
+var status = { version: '0.3.4', web: 'starting', relay: 'starting', dns: 'off', https: 'off', http: 'off', setup: 'starting', vpn: 'not configured', saved: '-', mode: 'local', answerIp: '127.0.0.1', lanIps: [] };
 var handles = [];
 var started = false;
 // Ports actually bound (may differ from cfg.* if the preferred one was busy).
-var VERSION = '0.3.3';
+var VERSION = '0.3.4';
 var ports = { setup: 0, relay: 0, web: 0 };
 var PORT_TRIES = 30;
 
@@ -615,6 +615,13 @@ function handleWeb(req, res) {
     src.on('error', function () { webError(res, 502, 'decode error'); });
     src.on('end', function () {
       var text = Buffer.concat(chunks).toString('utf8');
+      try {
+        if (ur.statusCode >= 400) log('web BODY', ur.statusCode, path.slice(0, 40), text.slice(0, 400).replace(/\s+/g, ' '));
+        if (/^\/youtubei\/v1\/player/.test(path)) {
+          var ps = text.match(/"playabilityStatus"\s*:\s*\{\s*"status"\s*:\s*"([A-Z_]+)"(?:[^}]*?"reason"\s*:\s*"([^"]*)")?/);
+          log('web PLAYER', ps ? ps[1] + (ps[2] ? ' | ' + ps[2] : '') : 'no playabilityStatus', '| streamingData=' + (/"streamingData"/.test(text) ? 'yes' : 'no'), '| len=' + text.length);
+        }
+      } catch (e) {}
       text = rewriteText(text, hostport);
       if (/text\/html/i.test(ct)) text = fixHtml(text);
       var out = bFromStr(text, 'utf8');
@@ -632,6 +639,11 @@ function handleWeb(req, res) {
   up.setTimeout(45000, function () { up.abort(); });
   up.on('error', function (e) { log('web upstream error:', host, e.message); webError(res, 502, 'Нет связи с ' + host + ' через VPN: ' + e.message); });
   res.on('close', function () { try { up.abort(); } catch (e) {} });
+  if (req.method === 'POST' && /^\/o\/oauth2\/device\/code/.test(path)) {
+    var rb = '';
+    req.on('data', function (d) { if (rb.length < 400) rb += d.toString('utf8'); });
+    req.on('end', function () { log('web REQBODY device/code', rb.slice(0, 400)); });
+  }
   req.pipe(up);
 }
 
