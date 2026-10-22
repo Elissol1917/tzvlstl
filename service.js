@@ -27,11 +27,11 @@ var cfg = {
     'googleapis.com', 'gstatic.com', 'google.com', 'googleusercontent.com'],
   upstreamDns: ['8.8.8.8', '1.1.1.1']
 };
-var status = { version: '0.3.4', web: 'starting', relay: 'starting', dns: 'off', https: 'off', http: 'off', setup: 'starting', vpn: 'not configured', saved: '-', mode: 'local', answerIp: '127.0.0.1', lanIps: [] };
+var status = { version: '0.3.5', web: 'starting', relay: 'starting', dns: 'off', https: 'off', http: 'off', setup: 'starting', vpn: 'not configured', saved: '-', mode: 'local', answerIp: '127.0.0.1', lanIps: [] };
 var handles = [];
 var started = false;
 // Ports actually bound (may differ from cfg.* if the preferred one was busy).
-var VERSION = '0.3.4';
+var VERSION = '0.3.5';
 var ports = { setup: 0, relay: 0, web: 0 };
 var PORT_TRIES = 30;
 
@@ -502,8 +502,10 @@ function agentFor(host) {
 }
 
 function rewriteText(s, hostport) {
-  return s.replace(/(https?:)?(\\?\/\\?\/)((?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,})/g, function (all, proto, sep, host) {
+  return s.replace(/(https?:)?(\\?\/\\?\/)((?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,})/g, function (all, proto, sep, host, off, str) {
     if (!matches(host.toLowerCase())) return all;
+    // OAuth scope names look like URLs (https://www.googleapis.com/auth/...) but are identifiers, not addresses.
+    if (/^\\?\/auth\\?\//.test(str.substr(off + all.length, 10))) return all;
     var sl = sep.length > 2 ? '\\/' : '/';
     return (proto ? 'http:' : '') + sep + hostport + sl + '__h' + sl + host;
   });
@@ -528,14 +530,20 @@ function fixCookie(c) {
 
 var CLIENT_PATCH = '(function(){try{' +
   'var DOMS=__DOMS__,B=location.protocol+"//"+location.host;' +
+  'var RN=0;function rep(m){try{if(RN++>80)return;var im=new Image();im.src=B+"/__clog?m="+encodeURIComponent(String(m).slice(0,300));}catch(e){}}' +
+  'window.addEventListener("error",function(e){rep("js "+e.message+" @"+String(e.filename||"").slice(-50)+":"+e.lineno);});' +
+  'window.addEventListener("unhandledrejection",function(e){var r=e.reason;rep("rej "+(r&&r.message?r.message:r));});' +
+  'document.addEventListener("error",function(e){var t=e.target;if(t&&(t.tagName==="VIDEO"||t.tagName==="AUDIO")){rep("media err "+(t.error?t.error.code+" "+(t.error.message||""):"?")+" "+String(t.currentSrc||t.src||"").slice(0,100));}},true);' +
   'function ok(h){h=String(h).toLowerCase();for(var i=0;i<DOMS.length;i++){var d=DOMS[i];if(h===d||h.slice(-d.length-1)==="."+d)return true;}return false;}' +
   'function rw(u){if(typeof u!=="string")return u;var m=u.match(/^(?:https?:)?\\/\\/([^\\/?#:]+)(?::\\d+)?([\\s\\S]*)$/i);' +
   'if(m&&ok(m[1])){var r=m[2]||"/";if(r.charAt(0)!=="/")r="/"+r;return B+"/__h/"+m[1].toLowerCase()+r;}return u;}' +
   'function rwt(s){return String(s).replace(/(https?:)?\\/\\/((?:[a-zA-Z0-9-]+\\.)+[a-zA-Z]{2,})/g,function(a,p,h){return ok(h)?B+"/__h/"+h.toLowerCase():a;});}' +
   'var of=window.fetch;if(of){window.fetch=function(i,n){if(typeof i==="string"){i=rw(i);}' +
   'else if(i&&typeof i.url==="string"){var nu=rw(i.url);if(nu!==i.url){i=new Request(nu,i);}}' +
-  'else if(i&&typeof i.href==="string"){i=rw(i.href);}return of.call(this,i,n);};}' +
-  'var xo=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(){var a=[].slice.call(arguments);a[1]=rw(String(a[1]));return xo.apply(this,a);};' +
+  'else if(i&&typeof i.href==="string"){i=rw(i.href);}' +
+  'var u0=typeof i==="string"?i:(i&&i.url)||"";if(/googlevideo/.test(u0))rep("fetch "+String(u0).slice(0,120));' +
+  'var pr=of.call(this,i,n);try{pr.then(null,function(e){rep("fetch fail "+String(u0).slice(0,80)+" "+e);});}catch(x){}return pr;};}' +
+  'var xo=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(){var a=[].slice.call(arguments);a[1]=rw(String(a[1]));if(/googlevideo/.test(a[1]))rep("xhr "+String(a[1]).slice(0,120));return xo.apply(this,a);};' +
   'function pp(proto,prop){try{var d=Object.getOwnPropertyDescriptor(proto,prop);if(!d||!d.set)return;' +
   'Object.defineProperty(proto,prop,{configurable:true,enumerable:d.enumerable,get:d.get,set:function(v){d.set.call(this,rw(String(v)));}});}catch(e){}}' +
   'pp(HTMLImageElement.prototype,"src");pp(HTMLScriptElement.prototype,"src");pp(HTMLLinkElement.prototype,"href");' +
@@ -564,6 +572,14 @@ function webError(res, code, msg) {
 function handleWeb(req, res) {
   var hostport = req.headers.host || ('127.0.0.1:' + (ports.web || cfg.webPort || 8095));
   var base = 'http://' + hostport;
+  if (req.url.indexOf('/__clog?m=') === 0) {
+    var cm = req.url.slice(10);
+    try { cm = decodeURIComponent(cm); } catch (e) {}
+    log('client', cm);
+    res.writeHead(204, { 'Cache-Control': 'no-store' });
+    res.end();
+    return;
+  }
   if (!cfg.server || !cfg.uuid) { webError(res, 503, '<h2>VPN не настроен</h2><p>Откройте на телефоне http://IP_ТВ:' + (ports.setup || cfg.setupPort || 8090) + ' и вставьте ссылку vless://</p>'); return; }
   var host = 'www.youtube.com';
   var path = req.url;
@@ -620,9 +636,17 @@ function handleWeb(req, res) {
         if (/^\/youtubei\/v1\/player/.test(path)) {
           var ps = text.match(/"playabilityStatus"\s*:\s*\{\s*"status"\s*:\s*"([A-Z_]+)"(?:[^}]*?"reason"\s*:\s*"([^"]*)")?/);
           log('web PLAYER', ps ? ps[1] + (ps[2] ? ' | ' + ps[2] : '') : 'no playabilityStatus', '| streamingData=' + (/"streamingData"/.test(text) ? 'yes' : 'no'), '| len=' + text.length);
+          var gv = text.match(/https?:\\?\/\\?\/[a-z0-9.-]*googlevideo\.com[^"\s]{0,70}/i);
+          log('web PLAYER-URLS gv=' + (text.match(/googlevideo\.com/g) || []).length, 'cipher=' + /signatureCipher/.test(text), 'sabr=' + /serverAbrStreamingUrl/.test(text), 'first=' + (gv ? gv[0] : '-'));
         }
       } catch (e) {}
       text = rewriteText(text, hostport);
+      try {
+        if (/^\/youtubei\/v1\/player/.test(path)) {
+          var gv2 = text.match(/\/__h\/[a-z0-9.-]*googlevideo\.com[^"\s]{0,70}/i);
+          log('web PLAYER-REWRITTEN first=' + (gv2 ? gv2[0] : '-'));
+        }
+      } catch (e) {}
       if (/text\/html/i.test(ct)) text = fixHtml(text);
       var out = bFromStr(text, 'utf8');
       delete rh['content-encoding']; delete rh['content-length'];
