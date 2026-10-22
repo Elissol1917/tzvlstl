@@ -27,11 +27,11 @@ var cfg = {
     'googleapis.com', 'gstatic.com', 'google.com', 'googleusercontent.com'],
   upstreamDns: ['8.8.8.8', '1.1.1.1']
 };
-var status = { version: '0.3.8', web: 'starting', relay: 'starting', dns: 'off', https: 'off', http: 'off', setup: 'starting', vpn: 'not configured', saved: '-', mode: 'local', answerIp: '127.0.0.1', lanIps: [] };
+var status = { version: '0.3.9', web: 'starting', relay: 'starting', dns: 'off', https: 'off', http: 'off', setup: 'starting', vpn: 'not configured', saved: '-', mode: 'local', answerIp: '127.0.0.1', lanIps: [] };
 var handles = [];
 var started = false;
 // Ports actually bound (may differ from cfg.* if the preferred one was busy).
-var VERSION = '0.3.8';
+var VERSION = '0.3.9';
 var ports = { setup: 0, relay: 0, web: 0 };
 var PORT_TRIES = 30;
 
@@ -631,8 +631,16 @@ function handleWeb(req, res) {
     if (!TEXT_RE.test(ct) || !plainEnc || ur.statusCode === 206 || ur.statusCode === 204 || ur.statusCode === 304) {
       if (/googlevideo\.com$/.test(host) && /^\/videoplayback/.test(path)) {
         var nb = 0;
-        ur.on('data', function (d) { nb += d.length; });
-        ur.on('end', function () { log('web GV done', req.method, ur.statusCode, ct.slice(0, 40), 'bytes=' + nb, 'cl=' + (ur.headers['content-length'] || '-')); });
+        var cap = bAlloc(0);
+        ur.on('data', function (d) { nb += d.length; if (cap.length < 96) cap = Buffer.concat([cap, d]).slice(0, 96); });
+        ur.on('end', function () {
+          log('web GV done', req.method, ur.statusCode, ct.slice(0, 40), 'bytes=' + nb, 'cl=' + (ur.headers['content-length'] || '-'), 'reqlen=' + (req.headers['content-length'] || '-'));
+          if (nb <= 200) {
+            // tiny UMP answers are almost certainly an error/redirect part: show them
+            var qn = (path.split('?')[1] || '').split('&').map(function (kv) { return kv.split('=')[0]; }).join(',');
+            log('web GV tiny hex=' + cap.toString('hex') + ' ascii=' + cap.toString('latin1').replace(/[^\x20-\x7e]/g, '.') + ' params=' + qn);
+          }
+        });
         ur.on('aborted', function () { log('web GV aborted after', nb, 'bytes'); });
       }
       res.writeHead(ur.statusCode, rh);
