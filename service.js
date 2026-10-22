@@ -21,11 +21,13 @@ var DIRNAME = (typeof __dirname !== 'undefined') ? __dirname : null;
 var cfg = {
   server: '', serverIp: '', port: 443, uuid: '', tls: true, sni: '', host: '', path: '/', allowInsecure: false,
   listen: 8080, setupPort: 8090, dnsPort: 53, httpsPort: 443, httpPort: 80,
+  lan: false, privileged: false, bindIp: '127.0.0.1', answerIp: '127.0.0.1',
+  webPort: 8095, sniPort: 8443, upstreamInsecure: false,
   domains: ['youtube.com', 'youtu.be', 'youtube-nocookie.com', 'googlevideo.com', 'ytimg.com', 'ggpht.com',
     'googleapis.com', 'gstatic.com', 'google.com', 'googleusercontent.com'],
   upstreamDns: ['8.8.8.8', '1.1.1.1']
 };
-var status = { dns: 'starting', https: 'starting', http: 'starting', proxy: 'starting', setup: 'starting', vpn: 'not configured', saved: '-' };
+var status = { web: 'starting', relay: 'starting', dns: 'off', https: 'off', http: 'off', setup: 'starting', vpn: 'not configured', saved: '-', mode: 'local', answerIp: '127.0.0.1', lanIps: [] };
 var handles = [];
 var started = false;
 
@@ -40,6 +42,21 @@ function bFromArr(a) { return (Buffer.from && Buffer.from !== Uint8Array.from) ?
 function bFromStr(s, enc) { return (Buffer.from && Buffer.from !== Uint8Array.from) ? Buffer.from(s, enc) : new Buffer(s, enc); }
 
 // ---- config ----
+function lanIps() {
+  var out = [], nets;
+  try { nets = os.networkInterfaces(); } catch (e) { return out; }
+  for (var name in nets) {
+    for (var i = 0; i < nets[name].length; i++) {
+      var a = nets[name][i];
+      if ((a.family === 'IPv4' || a.family === 4) && !a.internal) out.push(a.address);
+    }
+  }
+  return out;
+}
+function pickLanIp(list) {
+  for (var i = 0; i < list.length; i++) { if (/^(192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)/.test(list[i])) return list[i]; }
+  return list[0] || null;
+}
 function secretPaths() {
   if (ENV.TV_VLESS_SECRET) return [ENV.TV_VLESS_SECRET];
   var list = [];
@@ -58,6 +75,15 @@ function loadCfg() {
     try { merge(cfg, JSON.parse(fs.readFileSync(ps[i], 'utf8'))); status.saved = ps[i]; break; } catch (e) {}
   }
   status.vpn = (cfg.server && cfg.uuid) ? 'configured' : 'not configured';
+  if (cfg.lan || ENV.TV_VLESS_LAN) {
+    cfg.lan = true;
+    cfg.bindIp = '0.0.0.0';
+    status.lanIps = lanIps();
+    var ip = ENV.TV_VLESS_IP || ((cfg.answerIp && cfg.answerIp !== '127.0.0.1') ? cfg.answerIp : pickLanIp(status.lanIps));
+    cfg.answerIp = ip || '127.0.0.1';
+    status.mode = 'LAN (на компьютере)';
+  }
+  status.answerIp = cfg.answerIp;
 }
 
 function saveVpn(v) {
@@ -262,11 +288,14 @@ function startSetup() {
   function form(msg) {
     return '<h2>TizenVLESS</h2>' + (msg ? '<p><b>' + msg + '</b></p>' : '') +
       '<p>VPN: ' + status.vpn + '<br>Хранится: ' + status.saved + '</p>' +
+      (cfg.lan ? '<p><b>DNS для телевизора: ' + status.answerIp + '</b><br>Все адреса этого ПК: ' + status.lanIps.join(', ') + '</p>' : '') +
       '<p>Диагностика (ok = порт занят успешно):</p><pre>' + JSON.stringify(status, null, 1) + '</pre>' +
       '<form method="POST" action="/save"><p>Вставьте ссылку vless:// (ws + tls):</p>' +
       '<textarea name="link" rows="6" style="width:100%"></textarea><p><button style="font-size:20px;padding:8px 20px">Сохранить</button></p></form>';
   }
   var srv = http.createServer(function (req, res) {
+    if (req.url === '/ping') { res.writeHead(200, { 'Access-Control-Allow-Origin': '*' }); res.end('ok'); return; }
+    if (req.url === '/status.json') { res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }); res.end(JSON.stringify(status)); return; }
     if (req.method === 'POST' && req.url === '/save') {
       var body = '';
       req.on('data', function (d) { body += d; if (body.length > 8192) req.destroy(); });
@@ -309,8 +338,8 @@ function parseSNI(buf) {
   return null;
 }
 
-function startSni(port, kind) {
-  var key = kind === 'tls' ? 'https' : 'http';
+function startSni(port, kind, bindAddr, keyName) {
+  var key = keyName || (kind === 'tls' ? 'https' : 'http');
   var srv = net.createServer(function (client) {
     client.on('error', function () {});
     var buf = bAlloc(0);
@@ -328,14 +357,14 @@ function startSni(port, kind) {
         host = mm ? mm[1].trim() : null;
       }
       client.removeListener('data', onData);
-      if (!host) { client.destroy(); return; }
+      if (!host || !matches(String(host).toLowerCase())) { log('blocked', host); client.destroy(); return; }
       log(kind, host);
       tunnel(host, kind === 'tls' ? 443 : 80, client, buf, null);
     }
     client.on('data', onData);
   });
   srv.on('error', function (e) { status[key] = e.code || e.message; log(key + ' bind error:', e.message); });
-  srv.listen(port, '127.0.0.1', function () { status[key] = 'ok'; log(key + ' listening on ' + port); });
+  srv.listen(port, bindAddr || cfg.bindIp || '127.0.0.1', function () { status[key] = 'ok'; log(key + ' listening on ' + port); });
   handles.push(srv);
 }
 
@@ -365,7 +394,8 @@ function startDns() {
         var q = msg.slice(12, qEnd);
         if (qtype === 1) {
           hdr.writeUInt16BE(1, 6);
-          var ans = bFromArr([0xC0, 0x0C, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 127, 0, 0, 1]);
+          var ipb = String(cfg.answerIp || '127.0.0.1').split('.');
+          var ans = bFromArr([0xC0, 0x0C, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, +ipb[0], +ipb[1], +ipb[2], +ipb[3]]);
           sock.send(Buffer.concat([hdr, q, ans]), 0, 12 + q.length + 16, rinfo.port, rinfo.address);
         } else {
           sock.send(Buffer.concat([hdr, q]), 0, 12 + q.length, rinfo.port, rinfo.address);
@@ -383,8 +413,165 @@ function startDns() {
       }
     } catch (e) { log('dns handler error:', e.message); }
   });
-  sock.bind(cfg.dnsPort || 53, '127.0.0.1', function () { status.dns = 'ok'; log('dns listening on ' + (cfg.dnsPort || 53)); });
+  sock.bind(cfg.dnsPort || 53, cfg.bindIp || '127.0.0.1', function () { status.dns = 'ok'; log('dns listening on ' + (cfg.dnsPort || 53)); });
   handles.push(sock);
+}
+
+
+// ---- web proxy for YouTube TV (no privileged ports needed) ----
+// Page is opened from http://127.0.0.1:<webPort>/tv ; this server fetches the real site over HTTPS
+// through the local SNI relay -> VLESS, and rewrites absolute URLs so every request comes back here.
+var https = require('https');
+var zlib = require('zlib');
+var agents = {};
+var wcache = {};
+var wcacheKeys = [];
+var HOP = { 'connection': 1, 'keep-alive': 1, 'proxy-authenticate': 1, 'proxy-authorization': 1, 'te': 1, 'trailer': 1, 'transfer-encoding': 1, 'upgrade': 1 };
+var TEXT_RE = /(text\/html|javascript|json|text\/css|xml|text\/plain)/i;
+
+function agentFor(host) {
+  if (!agents[host]) agents[host] = new https.Agent({ keepAlive: true, maxSockets: 8 });
+  return agents[host];
+}
+
+function rewriteText(s, hostport) {
+  return s.replace(/(https?:)?(\\?\/\\?\/)((?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,})/g, function (all, proto, sep, host) {
+    if (!matches(host.toLowerCase())) return all;
+    var sl = sep.length > 2 ? '\\/' : '/';
+    return (proto ? 'http:' : '') + sep + hostport + sl + '__h' + sl + host;
+  });
+}
+
+function toUpstream(u, base) {
+  if (u.indexOf(base) !== 0) return u;
+  var rest = u.slice(base.length);
+  var m = rest.match(/^\/__h\/([^\/?#]+)(.*)$/);
+  if (m) return 'https://' + m[1] + (m[2] || '/');
+  return 'https://www.youtube.com' + rest;
+}
+
+function fixLocation(loc, host, hostport) {
+  if (/^\/(?!\/)/.test(loc) && host !== 'www.youtube.com') return '/__h/' + host + loc;
+  return rewriteText(loc, hostport);
+}
+
+function fixCookie(c) {
+  return String(c).replace(/;\s*domain=[^;]*/ig, '').replace(/;\s*secure/ig, '').replace(/;\s*samesite=[^;]*/ig, '');
+}
+
+var CLIENT_PATCH = '(function(){try{' +
+  'var DOMS=__DOMS__,B=location.protocol+"//"+location.host;' +
+  'function ok(h){h=String(h).toLowerCase();for(var i=0;i<DOMS.length;i++){var d=DOMS[i];if(h===d||h.slice(-d.length-1)==="."+d)return true;}return false;}' +
+  'function rw(u){if(typeof u!=="string")return u;var m=u.match(/^(?:https?:)?\\/\\/([^\\/?#:]+)(?::\\d+)?([\\s\\S]*)$/i);' +
+  'if(m&&ok(m[1])){var r=m[2]||"/";if(r.charAt(0)!=="/")r="/"+r;return B+"/__h/"+m[1].toLowerCase()+r;}return u;}' +
+  'function rwt(s){return String(s).replace(/(https?:)?\\/\\/((?:[a-zA-Z0-9-]+\\.)+[a-zA-Z]{2,})/g,function(a,p,h){return ok(h)?B+"/__h/"+h.toLowerCase():a;});}' +
+  'var of=window.fetch;if(of){window.fetch=function(i,n){if(typeof i==="string"){i=rw(i);}' +
+  'else if(i&&typeof i.url==="string"){var nu=rw(i.url);if(nu!==i.url){i=new Request(nu,i);}}' +
+  'else if(i&&typeof i.href==="string"){i=rw(i.href);}return of.call(this,i,n);};}' +
+  'var xo=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(){var a=[].slice.call(arguments);a[1]=rw(String(a[1]));return xo.apply(this,a);};' +
+  'function pp(proto,prop){try{var d=Object.getOwnPropertyDescriptor(proto,prop);if(!d||!d.set)return;' +
+  'Object.defineProperty(proto,prop,{configurable:true,enumerable:d.enumerable,get:d.get,set:function(v){d.set.call(this,rw(String(v)));}});}catch(e){}}' +
+  'pp(HTMLImageElement.prototype,"src");pp(HTMLScriptElement.prototype,"src");pp(HTMLLinkElement.prototype,"href");' +
+  'pp(HTMLIFrameElement.prototype,"src");pp(HTMLSourceElement.prototype,"src");pp(HTMLMediaElement.prototype,"src");' +
+  'var sa=Element.prototype.setAttribute;Element.prototype.setAttribute=function(n,v){if((n==="src"||n==="href"||n==="poster")&&typeof v==="string")v=rw(v);return sa.call(this,n,v);};' +
+  'try{var cs=CSSStyleDeclaration.prototype;["backgroundImage","background"].forEach(function(p){var d=Object.getOwnPropertyDescriptor(cs,p);' +
+  'if(d&&d.set){Object.defineProperty(cs,p,{configurable:true,enumerable:d.enumerable,get:d.get,set:function(v){d.set.call(this,rwt(v));}});}});' +
+  'var sp=cs.setProperty;cs.setProperty=function(n,v,pr){if(/background|image/i.test(n)&&typeof v==="string")v=rwt(v);return sp.call(this,n,v,pr);};}catch(e){}' +
+  'if(navigator.sendBeacon){var sb=navigator.sendBeacon;navigator.sendBeacon=function(u,d){return sb.call(navigator,rw(String(u)),d);};}' +
+  '}catch(e){}})();';
+
+function fixHtml(body) {
+  body = body.replace(/<meta[^>]+http-equiv=["']?content-security-policy["']?[^>]*>/ig, '')
+             .replace(/\sintegrity=("[^"]*"|'[^']*')/ig, '');
+  var inj = '<script>' + CLIENT_PATCH.replace('__DOMS__', JSON.stringify(cfg.domains || [])) + '</script>';
+  if (/<head[^>]*>/i.test(body)) return body.replace(/<head[^>]*>/i, function (m) { return m + inj; });
+  return inj + body;
+}
+
+function webError(res, code, msg) {
+  if (res.headersSent) { try { res.end(); } catch (e) {} return; }
+  res.writeHead(code, { 'Content-Type': 'text/html; charset=utf-8' });
+  res.end('<meta charset="utf-8"><body style="font:28px sans-serif;background:#12203a;color:#fff;padding:40px">' + msg + '</body>');
+}
+
+function handleWeb(req, res) {
+  var hostport = req.headers.host || ('127.0.0.1:' + (cfg.webPort || 8095));
+  var base = 'http://' + hostport;
+  if (!cfg.server || !cfg.uuid) { webError(res, 503, '<h2>VPN не настроен</h2><p>Откройте на телефоне http://IP_ТВ:' + (cfg.setupPort || 8090) + ' и вставьте ссылку vless://</p>'); return; }
+  var host = 'www.youtube.com';
+  var path = req.url;
+  var m = req.url.match(/^\/__h\/([^\/?#]+)(.*)$/);
+  if (m) { host = m[1].toLowerCase(); path = m[2] || '/'; if (path.charAt(0) !== '/') path = '/' + path; }
+  else if (req.url === '/' || req.url === '') { res.writeHead(302, { Location: '/tv' }); res.end(); return; }
+  if (!matches(host)) { webError(res, 403, 'blocked: ' + host); return; }
+
+  var h = {};
+  for (var k in req.headers) { if (HOP[k] || k === 'host' || k === 'accept-encoding') continue; h[k] = req.headers[k]; }
+  h.host = host;
+  h['accept-encoding'] = 'identity';
+  if (h.origin) h.origin = toUpstream(h.origin, base);
+  if (h.referer) h.referer = toUpstream(h.referer, base);
+
+  var ckey = (req.method === 'GET' && /^\/(s|yts)\//.test(path)) ? host + path : null;
+  if (ckey && wcache[ckey]) {
+    var c = wcache[ckey];
+    res.writeHead(c.status, c.headers);
+    res.end(c.body);
+    return;
+  }
+
+  var up = https.request({
+    host: '127.0.0.1', port: cfg.sniPort || 8443, servername: host, method: req.method, path: path,
+    headers: h, agent: agentFor(host), rejectUnauthorized: !cfg.upstreamInsecure
+  }, function (ur) {
+    var rh = {};
+    for (var k2 in ur.headers) { if (!HOP[k2]) rh[k2] = ur.headers[k2]; }
+    delete rh['content-security-policy']; delete rh['content-security-policy-report-only'];
+    delete rh['x-frame-options']; delete rh['strict-transport-security']; delete rh['alt-svc'];
+    delete rh['report-to']; delete rh['nel'];
+    if (rh.location) rh.location = fixLocation(rh.location, host, hostport);
+    if (rh['set-cookie']) rh['set-cookie'] = [].concat(rh['set-cookie']).map(fixCookie);
+    var ct = String(ur.headers['content-type'] || '');
+    var enc = String(ur.headers['content-encoding'] || '').toLowerCase();
+    var plainEnc = (!enc || enc === 'identity' || enc === 'gzip' || enc === 'deflate');
+    if (!TEXT_RE.test(ct) || !plainEnc || ur.statusCode === 206 || ur.statusCode === 204 || ur.statusCode === 304) {
+      res.writeHead(ur.statusCode, rh);
+      ur.pipe(res);
+      return;
+    }
+    var src = ur;
+    if (enc === 'gzip') src = ur.pipe(zlib.createGunzip());
+    else if (enc === 'deflate') src = ur.pipe(zlib.createInflate());
+    var chunks = [];
+    src.on('data', function (d) { chunks.push(d); });
+    src.on('error', function () { webError(res, 502, 'decode error'); });
+    src.on('end', function () {
+      var text = Buffer.concat(chunks).toString('utf8');
+      text = rewriteText(text, hostport);
+      if (/text\/html/i.test(ct)) text = fixHtml(text);
+      var out = bFromStr(text, 'utf8');
+      delete rh['content-encoding']; delete rh['content-length'];
+      rh['content-length'] = out.length;
+      res.writeHead(ur.statusCode, rh);
+      res.end(out);
+      if (ckey && ur.statusCode === 200 && out.length < 6 * 1024 * 1024) {
+        wcache[ckey] = { status: 200, headers: rh, body: out };
+        wcacheKeys.push(ckey);
+        if (wcacheKeys.length > 30) delete wcache[wcacheKeys.shift()];
+      }
+    });
+  });
+  up.setTimeout(45000, function () { up.abort(); });
+  up.on('error', function (e) { log('web upstream error:', host, e.message); webError(res, 502, 'Нет связи с ' + host + ' через VPN: ' + e.message); });
+  res.on('close', function () { try { up.abort(); } catch (e) {} });
+  req.pipe(up);
+}
+
+function startWeb() {
+  var srv = http.createServer(handleWeb);
+  srv.on('error', function (e) { status.web = e.code || e.message; log('web error:', e.message); });
+  srv.listen(cfg.webPort || 8095, '127.0.0.1', function () { status.web = 'ok'; log('web proxy on 127.0.0.1:' + (cfg.webPort || 8095)); });
+  handles.push(srv);
 }
 
 // ---- lifecycle ----
@@ -394,11 +581,14 @@ function start() {
   if (started) return;
   started = true;
   safe('config', loadCfg);
-  safe('proxy', startProxy);
   safe('setup', startSetup);
-  safe('dns', startDns);
-  safe('https', function () { startSni(cfg.httpsPort || 443, 'tls'); });
-  safe('http', function () { startSni(cfg.httpPort || 80, 'http'); });
+  safe('relay', function () { startSni(cfg.sniPort || 8443, 'tls', '127.0.0.1', 'relay'); });
+  safe('web', startWeb);
+  if (cfg.lan || cfg.privileged) {
+    safe('dns', startDns);
+    safe('https', function () { startSni(cfg.httpsPort || 443, 'tls'); });
+    safe('http', function () { startSni(cfg.httpPort || 80, 'http'); });
+  }
 }
 
 function stop() {
