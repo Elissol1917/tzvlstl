@@ -27,16 +27,23 @@ var cfg = {
     'googleapis.com', 'gstatic.com', 'google.com', 'googleusercontent.com'],
   upstreamDns: ['8.8.8.8', '1.1.1.1']
 };
-var status = { version: '0.3.2', web: 'starting', relay: 'starting', dns: 'off', https: 'off', http: 'off', setup: 'starting', vpn: 'not configured', saved: '-', mode: 'local', answerIp: '127.0.0.1', lanIps: [] };
+var status = { version: '0.3.3', web: 'starting', relay: 'starting', dns: 'off', https: 'off', http: 'off', setup: 'starting', vpn: 'not configured', saved: '-', mode: 'local', answerIp: '127.0.0.1', lanIps: [] };
 var handles = [];
 var started = false;
 // Ports actually bound (may differ from cfg.* if the preferred one was busy).
-var VERSION = '0.3.2';
+var VERSION = '0.3.3';
 var ports = { setup: 0, relay: 0, web: 0 };
 var PORT_TRIES = 30;
 
+var logbuf = [];
 function log() {
-  try { if (typeof console !== 'undefined') console.log.apply(console, ['[tizenvless]'].concat([].slice.call(arguments))); } catch (e) {}
+  var args = [].slice.call(arguments);
+  try {
+    var t = new Date().toISOString().slice(11, 19);
+    logbuf.push(t + ' ' + args.map(function (a) { return String(a); }).join(' '));
+    if (logbuf.length > 300) logbuf.shift();
+  } catch (e) {}
+  try { if (typeof console !== 'undefined') console.log.apply(console, ['[tizenvless]'].concat(args)); } catch (e) {}
 }
 function merge(a, b) { for (var k in b) { if (Object.prototype.hasOwnProperty.call(b, k)) a[k] = b[k]; } return a; }
 
@@ -324,12 +331,13 @@ function startSetup() {
     return '<h2>TizenVLESS</h2>' + (msg ? '<p><b>' + msg + '</b></p>' : '') +
       '<p>VPN: ' + status.vpn + '<br>Хранится: ' + status.saved + '</p>' +
       (cfg.lan ? '<p><b>DNS для телевизора: ' + status.answerIp + '</b><br>Все адреса этого ПК: ' + status.lanIps.join(', ') + '</p>' : '') +
-      '<p>Диагностика (ok = порт занят успешно):</p><pre>' + JSON.stringify(status, null, 1) + '</pre>' +
+      '<p><a href="/log">Журнал службы (/log)</a></p><p>Диагностика (ok = порт занят успешно):</p><pre>' + JSON.stringify(status, null, 1) + '</pre>' +
       '<form method="POST" action="/save"><p>Вставьте ссылку vless:// (ws + tls):</p>' +
       '<textarea name="link" rows="6" style="width:100%"></textarea><p><button style="font-size:20px;padding:8px 20px">Сохранить</button></p></form>';
   }
   function handler(req, res) {
     if (req.url === '/ping') { res.writeHead(200, { 'Access-Control-Allow-Origin': '*' }); res.end('ok'); return; }
+    if (req.url === '/log') { res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Access-Control-Allow-Origin': '*' }); res.end(logbuf.join('\n') || '(пусто)'); return; }
     if (req.url === '/status.json') { res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }); res.end(JSON.stringify(status)); return; }
     if (req.method === 'POST' && req.url === '/save') {
       var body = '';
@@ -583,6 +591,7 @@ function handleWeb(req, res) {
     host: '127.0.0.1', port: ports.relay || cfg.sniPort || 8443, servername: host, method: req.method, path: path,
     headers: h, agent: agentFor(host), rejectUnauthorized: !cfg.upstreamInsecure
   }, function (ur) {
+    log('web', req.method, ur.statusCode, host + path.slice(0, 70));
     var rh = {};
     for (var k2 in ur.headers) { if (!HOP[k2]) rh[k2] = ur.headers[k2]; }
     delete rh['content-security-policy']; delete rh['content-security-policy-report-only'];
