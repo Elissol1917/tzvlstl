@@ -22,16 +22,16 @@ var cfg = {
   server: '', serverIp: '', port: 443, uuid: '', tls: true, sni: '', host: '', path: '/', allowInsecure: false,
   listen: 8080, setupPort: 8090, dnsPort: 53, httpsPort: 443, httpPort: 80,
   lan: false, privileged: false, bindIp: '127.0.0.1', answerIp: '127.0.0.1',
-  webPort: 8095, sniPort: 8443, upstreamInsecure: false, noSabr: false,
+  webPort: 8095, sniPort: 8443, upstreamInsecure: false, noSabr: true,
   domains: ['youtube.com', 'youtu.be', 'youtube-nocookie.com', 'googlevideo.com', 'ytimg.com', 'ggpht.com',
     'googleapis.com', 'gstatic.com', 'google.com', 'googleusercontent.com'],
   upstreamDns: ['8.8.8.8', '1.1.1.1']
 };
-var status = { version: '0.3.13', started: new Date().toISOString(), noSabr: false, sps: '-', web: 'starting', relay: 'starting', dns: 'off', https: 'off', http: 'off', setup: 'starting', vpn: 'not configured', saved: '-', mode: 'local', answerIp: '127.0.0.1', lanIps: [] };
+var status = { version: '0.3.14', started: new Date().toISOString(), noSabr: false, sps: '-', web: 'starting', relay: 'starting', dns: 'off', https: 'off', http: 'off', setup: 'starting', vpn: 'not configured', saved: '-', mode: 'local', answerIp: '127.0.0.1', lanIps: [] };
 var handles = [];
 var started = false;
 // Ports actually bound (may differ from cfg.* if the preferred one was busy).
-var VERSION = '0.3.13';
+var VERSION = '0.3.14';
 var ports = { setup: 0, relay: 0, web: 0 };
 var PORT_TRIES = 30;
 
@@ -117,7 +117,8 @@ function loadCfg() {
     try { merge(cfg, JSON.parse(fs.readFileSync(ps[i], 'utf8'))); status.saved = ps[i]; break; } catch (e) {}
   }
   status.vpn = (cfg.server && cfg.uuid) ? 'configured' : 'not configured';
-  status.noSabr = !!cfg.noSabr;
+  cfg.noSabr = !ENV.TV_VLESS_KEEP_SABR;   // built in: a saved config must not turn it off again
+  status.noSabr = cfg.noSabr;
   if (cfg.lan || ENV.TV_VLESS_LAN) {
     cfg.lan = true;
     cfg.bindIp = '0.0.0.0';
@@ -129,7 +130,7 @@ function loadCfg() {
   status.answerIp = cfg.answerIp;
 }
 
-var PERSIST = ['server', 'serverIp', 'port', 'uuid', 'tls', 'sni', 'host', 'path', 'allowInsecure', 'noSabr'];
+var PERSIST = ['server', 'serverIp', 'port', 'uuid', 'tls', 'sni', 'host', 'path', 'allowInsecure'];
 function persistCfg() {
   var o = {};
   for (var k = 0; k < PERSIST.length; k++) { if (cfg[PERSIST[k]] !== undefined) o[PERSIST[k]] = cfg[PERSIST[k]]; }
@@ -341,26 +342,12 @@ function startSetup() {
       '<p><a href="/log">Журнал службы (/log)</a></p><p>Диагностика (ok = порт занят успешно):</p><pre>' + JSON.stringify(status, null, 1) + '</pre>' +
       '<form method="POST" action="/save"><p>Вставьте ссылку vless:// (ws + tls):</p>' +
       '<textarea name="link" rows="6" style="width:100%"></textarea><p><button style="font-size:20px;padding:8px 20px">Сохранить</button></p></form>' +
-      '<hr><form method="POST" action="/flags"><p><b>Эксперимент</b></p>' +
-      '<p><label><input type="checkbox" name="noSabr" value="1"' + (cfg.noSabr ? ' checked' : '') + '> Не использовать SABR (блокирует Onesie и убирает SABR из ответа плеера)</label></p>' +
-      '<p><button style="font-size:20px;padding:8px 20px">Применить</button></p><p>После этого полностью перезапустите YouTube на ТВ.</p></form>';
+      '<p>SABR отключён (вшито в программу).</p>';
   }
   function handler(req, res) {
     if (req.url === '/ping') { res.writeHead(200, { 'Access-Control-Allow-Origin': '*' }); res.end('ok'); return; }
     if (req.url === '/log') { res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Access-Control-Allow-Origin': '*' }); res.end(logbuf.join('\n') || '(пусто)'); return; }
     if (req.url === '/status.json') { res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }); res.end(JSON.stringify(status)); return; }
-    if (req.method === 'POST' && req.url === '/flags') {
-      var fb = '';
-      req.on('data', function (d) { fb += d; if (fb.length > 2048) req.destroy(); });
-      req.on('end', function () {
-        cfg.noSabr = qs.parse(fb).noSabr === '1';
-        status.noSabr = cfg.noSabr;
-        persistCfg();
-        log('flags saved: noSabr=' + cfg.noSabr);
-        send(res, 200, form('Сохранено. Полностью перезапустите YouTube на ТВ.'));
-      });
-      return;
-    }
     if (req.method === 'POST' && req.url === '/save') {
       var body = '';
       req.on('data', function (d) { body += d; if (body.length > 8192) req.destroy(); });
@@ -904,7 +891,7 @@ function handleWeb(req, res) {
     req.on('data', function (d) { sch.push(d); });
     req.on('end', function () {
       var sb = Buffer.concat(sch);
-      try { log('web SABR-REQ', sb.length + ' bytes', String(pbShape(sb, 0)).slice(0, 700)); } catch (e) {}
+      try { log('web SABR-REQ', sb.length + ' bytes', String(pbShape(sb, 0)).slice(0, 1800)); } catch (e) {}
       try { up.setHeader('content-length', sb.length); } catch (e) {}
       up.end(sb);
     });
