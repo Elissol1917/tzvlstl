@@ -27,11 +27,11 @@ var cfg = {
     'googleapis.com', 'gstatic.com', 'google.com', 'googleusercontent.com'],
   upstreamDns: ['8.8.8.8', '1.1.1.1']
 };
-var status = { version: '0.3.12', started: new Date().toISOString(), noSabr: false, sps: '-', web: 'starting', relay: 'starting', dns: 'off', https: 'off', http: 'off', setup: 'starting', vpn: 'not configured', saved: '-', mode: 'local', answerIp: '127.0.0.1', lanIps: [] };
+var status = { version: '0.3.13', started: new Date().toISOString(), noSabr: false, sps: '-', web: 'starting', relay: 'starting', dns: 'off', https: 'off', http: 'off', setup: 'starting', vpn: 'not configured', saved: '-', mode: 'local', answerIp: '127.0.0.1', lanIps: [] };
 var handles = [];
 var started = false;
 // Ports actually bound (may differ from cfg.* if the preferred one was busy).
-var VERSION = '0.3.12';
+var VERSION = '0.3.13';
 var ports = { setup: 0, relay: 0, web: 0 };
 var PORT_TRIES = 30;
 
@@ -342,7 +342,7 @@ function startSetup() {
       '<form method="POST" action="/save"><p>Вставьте ссылку vless:// (ws + tls):</p>' +
       '<textarea name="link" rows="6" style="width:100%"></textarea><p><button style="font-size:20px;padding:8px 20px">Сохранить</button></p></form>' +
       '<hr><form method="POST" action="/flags"><p><b>Эксперимент</b></p>' +
-      '<p><label><input type="checkbox" name="noSabr" value="1"' + (cfg.noSabr ? ' checked' : '') + '> Не использовать SABR (старый способ загрузки видео)</label></p>' +
+      '<p><label><input type="checkbox" name="noSabr" value="1"' + (cfg.noSabr ? ' checked' : '') + '> Не использовать SABR (блокирует Onesie и убирает SABR из ответа плеера)</label></p>' +
       '<p><button style="font-size:20px;padding:8px 20px">Применить</button></p><p>После этого полностью перезапустите YouTube на ТВ.</p></form>';
   }
   function handler(req, res) {
@@ -707,6 +707,39 @@ function playerInfo(text) {
   } catch (e) { return 'fmts=? (' + e.message + ')'; }
 }
 
+var sabrReqLogs = 0;
+function pbShape(buf, depth) {
+  var i = 0, out = [], n = buf.length;
+  function rv() {
+    var v = 0, mul = 1, b;
+    do { if (i >= n) return null; b = buf[i++]; v += (b & 0x7f) * mul; mul *= 128; } while (b & 0x80);
+    return v;
+  }
+  while (i < n) {
+    var tag = rv();
+    if (tag === null) return null;
+    var fno = Math.floor(tag / 8), wt = tag & 7;
+    if (fno < 1 || fno > 5000) return null;
+    if (wt === 0) { var v = rv(); if (v === null) return null; out.push('f' + fno + '=' + (v > 100000000 ? 'big' : v)); }
+    else if (wt === 1) { if (i + 8 > n) return null; i += 8; out.push('f' + fno + '=i64'); }
+    else if (wt === 5) { if (i + 4 > n) return null; i += 4; out.push('f' + fno + '=i32'); }
+    else if (wt === 2) {
+      var l = rv();
+      if (l === null || i + l > n) return null;
+      var sub = buf.slice(i, i + l);
+      i += l;
+      var shown = null;
+      if (l > 0 && depth < 3) { var ss = pbShape(sub, depth + 1); if (ss) shown = '{' + ss + '}'; }
+      if (shown === null) {
+        var txt = sub.toString('latin1');
+        shown = (l > 0 && l <= 16 && /^[\x20-\x7e]+$/.test(txt)) ? '"' + txt + '"' : 'len=' + l;
+      }
+      out.push('f' + fno + '=' + shown);
+    } else return null;
+  }
+  return out.join(' ');
+}
+
 // Experiment: remove the SABR streaming URL so the player falls back to classic per-format URLs (no Stream Protection).
 function dropSabr(text) {
   var info = playerInfo(text);
@@ -749,6 +782,15 @@ function handleWeb(req, res) {
   if (m) { host = m[1].toLowerCase(); path = m[2] || '/'; if (path.charAt(0) !== '/') path = '/' + path; }
   else if (req.url === '/' || req.url === '') { res.writeHead(302, { Location: '/tv' }); res.end(); return; }
   if (!matches(host)) { webError(res, 403, 'blocked: ' + host); return; }
+  if (cfg.noSabr && req.method === 'POST' && /googlevideo\.com$/.test(host) && /^\/initplayback/.test(path)) {
+    // Onesie: the player response (with SABR) comes back encrypted inside this call, out of reach. Refuse it; the app
+    // then falls back to the classic /youtubei/v1/player request, where the SABR link can be removed.
+    log('web NOSABR onesie blocked', host);
+    req.resume();
+    res.writeHead(404, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store' });
+    res.end('blocked');
+    return;
+  }
 
   var h = {};
   for (var k in req.headers) { if (HOP[k] || k === 'host' || k === 'accept-encoding') continue; h[k] = req.headers[k]; }
@@ -855,6 +897,16 @@ function handleWeb(req, res) {
       var ob = bFromStr(fixed, 'utf8');
       try { up.setHeader('content-length', ob.length); } catch (e) {}
       up.end(ob);
+    });
+  } else if (req.method === 'POST' && /googlevideo\.com$/.test(host) && /^\/videoplayback/.test(path) && sabrReqLogs < 3) {
+    sabrReqLogs++;
+    var sch = [];
+    req.on('data', function (d) { sch.push(d); });
+    req.on('end', function () {
+      var sb = Buffer.concat(sch);
+      try { log('web SABR-REQ', sb.length + ' bytes', String(pbShape(sb, 0)).slice(0, 700)); } catch (e) {}
+      try { up.setHeader('content-length', sb.length); } catch (e) {}
+      up.end(sb);
     });
   } else {
     req.pipe(up);
