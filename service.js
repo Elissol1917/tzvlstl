@@ -27,11 +27,11 @@ var cfg = {
     'googleapis.com', 'gstatic.com', 'google.com', 'googleusercontent.com'],
   upstreamDns: ['8.8.8.8', '1.1.1.1']
 };
-var status = { version: '0.3.15', started: new Date().toISOString(), noSabr: false, sps: '-', web: 'starting', relay: 'starting', dns: 'off', https: 'off', http: 'off', setup: 'starting', vpn: 'not configured', saved: '-', mode: 'local', answerIp: '127.0.0.1', lanIps: [] };
+var status = { version: '0.3.16', started: new Date().toISOString(), noSabr: false, sps: '-', web: 'starting', relay: 'starting', dns: 'off', https: 'off', http: 'off', setup: 'starting', vpn: 'not configured', saved: '-', mode: 'local', answerIp: '127.0.0.1', lanIps: [] };
 var handles = [];
 var started = false;
 // Ports actually bound (may differ from cfg.* if the preferred one was busy).
-var VERSION = '0.3.15';
+var VERSION = '0.3.16';
 var ports = { setup: 0, relay: 0, web: 0 };
 var PORT_TRIES = 30;
 
@@ -754,6 +754,63 @@ function dropSabr(text) {
   return JSON.stringify(j);
 }
 
+// Higher quality without SABR: ask YouTube for the same video as the Android VR client (direct urls, no PO token),
+// and put its formats into the TV's player response. Falls back to the plain SABR-less answer on any problem.
+var VR_VER = '1.60.19';
+var VR_UA = 'com.google.android.apps.youtube.vr.oculus/' + VR_VER + ' (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip';
+function vrFetch(videoId, cb) {
+  var done = false;
+  function fin(e, j) { if (done) return; done = true; cb(e, j); }
+  var body = JSON.stringify({
+    context: { client: { clientName: 'ANDROID_VR', clientVersion: VR_VER, deviceMake: 'Oculus', deviceModel: 'Quest 3', androidSdkVersion: 32, userAgent: VR_UA, osName: 'Android', osVersion: '12L', hl: 'en', timeZone: 'UTC', utcOffsetMinutes: 0 } },
+    videoId: videoId, contentCheckOk: true, racyCheckOk: true
+  });
+  var r = https.request({
+    host: '127.0.0.1', port: ports.relay || cfg.sniPort || 8443, servername: 'www.youtube.com', method: 'POST', path: '/youtubei/v1/player?prettyPrint=false',
+    headers: { host: 'www.youtube.com', 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), 'user-agent': VR_UA, 'x-youtube-client-name': '28', 'x-youtube-client-version': VR_VER, 'accept-encoding': 'identity' },
+    agent: agentFor('www.youtube.com'), rejectUnauthorized: !cfg.upstreamInsecure
+  }, function (ur) {
+    var ch = [];
+    ur.on('data', function (d) { ch.push(d); });
+    ur.on('end', function () {
+      try { fin(null, JSON.parse(Buffer.concat(ch).toString('utf8'))); } catch (e) { fin(new Error('status ' + ur.statusCode + ' ' + e.message)); }
+    });
+    ur.on('error', function (e) { fin(e); });
+  });
+  r.setTimeout(10000, function () { fin(new Error('timeout')); try { r.abort(); } catch (e) {} });
+  r.on('error', function (e) { fin(e); });
+  r.end(body);
+}
+function vrMerge(text, cb) {
+  var j, pr, vid;
+  try { j = JSON.parse(text); pr = j.playerResponse || j; vid = pr.videoDetails && pr.videoDetails.videoId; } catch (e) {}
+  if (!vid || !pr.streamingData || ENV.TV_VLESS_NO_VR) { cb(dropSabr(text)); return; }
+  vrFetch(vid, function (err, v) {
+    try {
+      if (err) throw err;
+      var ps = v.playabilityStatus && v.playabilityStatus.status;
+      var vs = v.streamingData || {};
+      var vf = [].concat(vs.formats || [], vs.adaptiveFormats || []).filter(function (f) { return f.url; });
+      if (ps !== 'OK' || !vf.length) throw new Error('vr ' + ps + (v.playabilityStatus && v.playabilityStatus.reason ? ' ' + v.playabilityStatus.reason : '') + ' direct=' + vf.length);
+      var sd = pr.streamingData, have = {};
+      var nf = (vs.formats || []).filter(function (f) { return f.url; });
+      var na = (vs.adaptiveFormats || []).filter(function (f) { return f.url; });
+      nf.concat(na).forEach(function (f) { have[f.itag] = 1; });
+      (sd.formats || []).forEach(function (f) { if (f.url && !have[f.itag]) nf.push(f); });
+      sd.formats = nf; sd.adaptiveFormats = na;
+      if (vs.expiresInSeconds) sd.expiresInSeconds = vs.expiresInSeconds;
+      delete sd.serverAbrStreamingUrl;
+      var q = {};
+      na.forEach(function (f) { if (f.qualityLabel) q[f.qualityLabel] = 1; });
+      log('web VR merged: muxed=' + nf.length + ' adaptive=' + na.length + ' qualities=' + Object.keys(q).join(','));
+      cb(JSON.stringify(j));
+    } catch (e) {
+      log('web VR failed (' + e.message + '), plain fallback');
+      cb(dropSabr(text));
+    }
+  });
+}
+
 // Responses that must reach the page byte-for-byte (attestation scripts / tokens).
 function isRaw(host, path) { return host === 'jnn-pa.googleapis.com' || /^\/js\/th\//.test(path); }
 
@@ -862,7 +919,8 @@ function handleWeb(req, res) {
           log('web PLAYER-URLS gv=' + (text.match(/googlevideo\.com/g) || []).length, 'cipher=' + /signatureCipher/.test(text), 'sabr=' + /serverAbrStreamingUrl/.test(text), 'first=' + (gv ? gv[0] : '-'));
         }
       } catch (e) {}
-      if (cfg.noSabr && /^\/youtubei\/v1\/(player|reel\/reel_item_watch)/.test(path)) text = dropSabr(text);
+      var isPl = cfg.noSabr && /^\/youtubei\/v1\/(player|reel\/reel_item_watch)/.test(path);
+      var finish = function () {
       if (host === 'jnn-pa.googleapis.com') log('web WAA', path.slice(0, 50), 'len=' + text.length);
       // Player responses keep their original googlevideo URLs: the player validates the host, and the
       // client patch (fetch/XHR/src) already sends those requests through this proxy.
@@ -878,6 +936,8 @@ function handleWeb(req, res) {
         wcacheKeys.push(ckey);
         if (wcacheKeys.length > 30) delete wcache[wcacheKeys.shift()];
       }
+      };
+      if (isPl) vrMerge(text, function (t2) { text = t2; finish(); }); else finish();
     });
   });
   up.setTimeout(45000, function () { up.abort(); });
