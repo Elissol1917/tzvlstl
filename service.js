@@ -22,16 +22,16 @@ var cfg = {
   server: '', serverIp: '', port: 443, uuid: '', tls: true, sni: '', host: '', path: '/', allowInsecure: false,
   listen: 8080, setupPort: 8090, dnsPort: 53, httpsPort: 443, httpPort: 80,
   lan: false, privileged: false, bindIp: '127.0.0.1', answerIp: '127.0.0.1',
-  webPort: 8095, sniPort: 8443, upstreamInsecure: false,
+  webPort: 8095, sniPort: 8443, upstreamInsecure: false, noSabr: false,
   domains: ['youtube.com', 'youtu.be', 'youtube-nocookie.com', 'googlevideo.com', 'ytimg.com', 'ggpht.com',
     'googleapis.com', 'gstatic.com', 'google.com', 'googleusercontent.com'],
   upstreamDns: ['8.8.8.8', '1.1.1.1']
 };
-var status = { version: '0.3.11', web: 'starting', relay: 'starting', dns: 'off', https: 'off', http: 'off', setup: 'starting', vpn: 'not configured', saved: '-', mode: 'local', answerIp: '127.0.0.1', lanIps: [] };
+var status = { version: '0.3.12', started: new Date().toISOString(), noSabr: false, sps: '-', web: 'starting', relay: 'starting', dns: 'off', https: 'off', http: 'off', setup: 'starting', vpn: 'not configured', saved: '-', mode: 'local', answerIp: '127.0.0.1', lanIps: [] };
 var handles = [];
 var started = false;
 // Ports actually bound (may differ from cfg.* if the preferred one was busy).
-var VERSION = '0.3.11';
+var VERSION = '0.3.12';
 var ports = { setup: 0, relay: 0, web: 0 };
 var PORT_TRIES = 30;
 
@@ -41,7 +41,7 @@ function log() {
   try {
     var t = new Date().toISOString().slice(11, 19);
     logbuf.push(t + ' ' + args.map(function (a) { return String(a); }).join(' '));
-    if (logbuf.length > 300) logbuf.shift();
+    if (logbuf.length > 600) logbuf.shift();
   } catch (e) {}
   try { if (typeof console !== 'undefined') console.log.apply(console, ['[tizenvless]'].concat(args)); } catch (e) {}
 }
@@ -117,6 +117,7 @@ function loadCfg() {
     try { merge(cfg, JSON.parse(fs.readFileSync(ps[i], 'utf8'))); status.saved = ps[i]; break; } catch (e) {}
   }
   status.vpn = (cfg.server && cfg.uuid) ? 'configured' : 'not configured';
+  status.noSabr = !!cfg.noSabr;
   if (cfg.lan || ENV.TV_VLESS_LAN) {
     cfg.lan = true;
     cfg.bindIp = '0.0.0.0';
@@ -128,14 +129,20 @@ function loadCfg() {
   status.answerIp = cfg.answerIp;
 }
 
-function saveVpn(v) {
-  merge(cfg, v);
+var PERSIST = ['server', 'serverIp', 'port', 'uuid', 'tls', 'sni', 'host', 'path', 'allowInsecure', 'noSabr'];
+function persistCfg() {
+  var o = {};
+  for (var k = 0; k < PERSIST.length; k++) { if (cfg[PERSIST[k]] !== undefined) o[PERSIST[k]] = cfg[PERSIST[k]]; }
   var ps = secretPaths();
   var saved = null;
   for (var i = 0; i < ps.length && !saved; i++) {
-    try { fs.writeFileSync(ps[i], JSON.stringify(v)); saved = ps[i]; } catch (e) {}
+    try { fs.writeFileSync(ps[i], JSON.stringify(o)); saved = ps[i]; } catch (e) {}
   }
   status.saved = saved || 'memory only (re-enter after restart)';
+}
+function saveVpn(v) {
+  merge(cfg, v);
+  persistCfg();
   status.vpn = 'configured';
 }
 
@@ -333,12 +340,27 @@ function startSetup() {
       (cfg.lan ? '<p><b>DNS для телевизора: ' + status.answerIp + '</b><br>Все адреса этого ПК: ' + status.lanIps.join(', ') + '</p>' : '') +
       '<p><a href="/log">Журнал службы (/log)</a></p><p>Диагностика (ok = порт занят успешно):</p><pre>' + JSON.stringify(status, null, 1) + '</pre>' +
       '<form method="POST" action="/save"><p>Вставьте ссылку vless:// (ws + tls):</p>' +
-      '<textarea name="link" rows="6" style="width:100%"></textarea><p><button style="font-size:20px;padding:8px 20px">Сохранить</button></p></form>';
+      '<textarea name="link" rows="6" style="width:100%"></textarea><p><button style="font-size:20px;padding:8px 20px">Сохранить</button></p></form>' +
+      '<hr><form method="POST" action="/flags"><p><b>Эксперимент</b></p>' +
+      '<p><label><input type="checkbox" name="noSabr" value="1"' + (cfg.noSabr ? ' checked' : '') + '> Не использовать SABR (старый способ загрузки видео)</label></p>' +
+      '<p><button style="font-size:20px;padding:8px 20px">Применить</button></p><p>После этого полностью перезапустите YouTube на ТВ.</p></form>';
   }
   function handler(req, res) {
     if (req.url === '/ping') { res.writeHead(200, { 'Access-Control-Allow-Origin': '*' }); res.end('ok'); return; }
     if (req.url === '/log') { res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Access-Control-Allow-Origin': '*' }); res.end(logbuf.join('\n') || '(пусто)'); return; }
     if (req.url === '/status.json') { res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }); res.end(JSON.stringify(status)); return; }
+    if (req.method === 'POST' && req.url === '/flags') {
+      var fb = '';
+      req.on('data', function (d) { fb += d; if (fb.length > 2048) req.destroy(); });
+      req.on('end', function () {
+        cfg.noSabr = qs.parse(fb).noSabr === '1';
+        status.noSabr = cfg.noSabr;
+        persistCfg();
+        log('flags saved: noSabr=' + cfg.noSabr);
+        send(res, 200, form('Сохранено. Полностью перезапустите YouTube на ТВ.'));
+      });
+      return;
+    }
     if (req.method === 'POST' && req.url === '/save') {
       var body = '';
       req.on('data', function (d) { body += d; if (body.length > 8192) req.destroy(); });
@@ -539,7 +561,7 @@ function fixCookie(c) {
 
 var CLIENT_PATCH = '(function(){try{' +
   'var DOMS=__DOMS__,B=location.protocol+"//"+location.host;' +
-  'var RN=0;function rep(m){try{if(RN++>80)return;var im=new Image();im.src=B+"/__clog?m="+encodeURIComponent(String(m).slice(0,300));}catch(e){}}' +
+  'var RN=0;function rep(m){try{if(RN++>150)return;var im=new Image();im.src=B+"/__clog?m="+encodeURIComponent(String(m).slice(0,300));}catch(e){}}' +
   'function S(x){try{var j=JSON.stringify(x);if(j&&j!=="{}")return j.slice(0,200);}catch(e){}return String(x&&x.message?x.message:x).slice(0,200);}' +
   'window.addEventListener("error",function(e){rep("js "+e.message+" @"+String(e.filename||"").slice(-50)+":"+e.lineno+" err="+S(e.error));});' +
   'window.addEventListener("unhandledrejection",function(e){rep("rej "+S(e.reason));});' +
@@ -548,20 +570,11 @@ var CLIENT_PATCH = '(function(){try{' +
   'function rw(u){if(typeof u!=="string")return u;var m=u.match(/^(?:https?:)?\\/\\/([^\\/?#:]+)(?::\\d+)?([\\s\\S]*)$/i);' +
   'if(m&&ok(m[1])){var r=m[2]||"/";if(r.charAt(0)!=="/")r="/"+r;return B+"/__h/"+m[1].toLowerCase()+r;}return u;}' +
   'function rwt(s){return String(s).replace(/(https?:)?\\/\\/((?:[a-zA-Z0-9-]+\\.)+[a-zA-Z]{2,})/g,function(a,p,h){return ok(h)?B+"/__h/"+h.toLowerCase():a;});}' +
-  // YouTube TV paints a debug bar ("NO DEBUG ACCESS DOMAIN=127.0.0.1 ...") on any non-youtube.com origin.
-  // Its markup is not known, so find it by text and hide the smallest box that holds only that text.
-  'var BH=0,bt=0;function big(e){return (e.textContent||"").length>300||e.getBoundingClientRect().height>window.innerHeight*0.2;}' +
-  'function hideBanner(){try{if(!document.body)return;' +
-  'var w=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT,null,false);var n;' +
-  'while((n=w.nextNode())){if(!n.nodeValue||n.nodeValue.indexOf("NO DEBUG ACCESS")<0)continue;' +
-  'var el=n.parentNode;if(!el||(el.closest&&el.closest("[data-tv-hid]")))continue;' +
-  'if(big(el)){n.nodeValue="";if(BH++<3)rep("banner text cleared in big <"+el.tagName+">");continue;}' +
-  'while(el.parentNode&&el.parentNode!==document.body&&el.parentNode!==document.documentElement&&!big(el.parentNode)){el=el.parentNode;}' +
-  'el.setAttribute("data-tv-hid","1");el.style.setProperty("display","none","important");' +
-  'if(BH++<3)rep("banner hidden <"+el.tagName+" class="+String(el.className).slice(0,60)+"> txt="+String(el.textContent).slice(0,50));}}catch(e){}}' +
-  'function schedBanner(){if(bt)return;bt=setTimeout(function(){bt=0;hideBanner();},500);}' +
-  'try{new MutationObserver(schedBanner).observe(document.documentElement,{childList:true,subtree:true});}catch(e){}' +
-  'try{setInterval(hideBanner,2000);}catch(e){}' +
+  // Make the wrapped functions look native: pages (e.g. integrity checks) may call Function.prototype.toString
+  // on fetch/XHR/setAttribute and would otherwise see the wrapper source.
+  'var NT=Function.prototype.toString,NM=new WeakMap();' +
+  'function nm(f,o){try{NM.set(f,o);Object.defineProperty(f,"name",{value:o.name,configurable:true});Object.defineProperty(f,"length",{value:o.length,configurable:true});}catch(e){}return f;}' +
+  'try{var nts=function toString(){var o=NM.get(this);return NT.call(o||this);};NM.set(nts,NT);Function.prototype.toString=nts;}catch(e){}' +
   'var of=window.fetch;' +
   // A Request object cannot simply be re-created with new Request(url, oldRequest): old Chromium has no readable
   // Request.body, so POST bodies (e.g. SABR protobuf) were lost. Read the body explicitly instead.
@@ -569,33 +582,148 @@ var CLIENT_PATCH = '(function(){try{' +
   'var init={method:m,headers:rq.headers,credentials:rq.credentials,cache:rq.cache,redirect:rq.redirect,mode:"cors"};' +
   'try{if(rq.signal)init.signal=rq.signal;}catch(e){}' +
   'if(n){for(var k in n){init[k]=n[k];}}' +
-  'var gv=/googlevideo/.test(nu);' +
-  'if(!hasBody||(n&&n.body!==undefined)){if(gv)rep("fetch(req) "+m+" nobody-read");return of.call(window,nu,init);}' +
-  'return rq.arrayBuffer().then(function(buf){init.body=buf;if(gv)rep("fetch(req) "+m+" bodylen="+buf.byteLength);return of.call(window,nu,init);});}' +
-  'if(of){window.fetch=function(i,n){if(typeof i==="string"){i=rw(i);}' +
+  'if(!hasBody||(n&&n.body!==undefined)){return of.call(window,nu,init);}' +
+  'return rq.arrayBuffer().then(function(buf){init.body=buf;return of.call(window,nu,init);});}' +
+  'if(of){window.fetch=nm(function(i,n){if(typeof i==="string"){i=rw(i);}' +
   'else if(i&&typeof i.url==="string"){var nu=rw(i.url);if(nu!==i.url){return rfetch(i,nu,n);}}' +
   'else if(i&&typeof i.href==="string"){i=rw(i.href);}' +
-  'var u0=typeof i==="string"?i:(i&&i.url)||"";if(/googlevideo/.test(u0))rep("fetch "+String(u0).slice(0,120));' +
-  'var pr=of.call(this,i,n);try{pr.then(function(r){if(/googlevideo/.test(u0))rep("fetch ok "+r.status+" "+(r.headers&&r.headers.get?r.headers.get("content-type"):""));},function(e){rep("fetch fail "+String(u0).slice(0,80)+" "+e);});}catch(x){}return pr;};}' +
-  'var xo=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(){var a=[].slice.call(arguments);a[1]=rw(String(a[1]));if(/googlevideo/.test(a[1]))rep("xhr "+String(a[1]).slice(0,120));return xo.apply(this,a);};' +
+  'var u0=typeof i==="string"?i:(i&&i.url)||"";' +
+  'var pr=of.call(this,i,n);try{pr.then(null,function(e){if(!(e&&e.name==="AbortError"))rep("fetch fail "+String(u0).slice(0,80)+" "+e);});}catch(x){}return pr;},of);}' +
+  'var xo=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=nm(function(){var a=[].slice.call(arguments);a[1]=rw(String(a[1]));return xo.apply(this,a);},xo);' +
   'function pp(proto,prop){try{var d=Object.getOwnPropertyDescriptor(proto,prop);if(!d||!d.set)return;' +
-  'Object.defineProperty(proto,prop,{configurable:true,enumerable:d.enumerable,get:d.get,set:function(v){d.set.call(this,rw(String(v)));}});}catch(e){}}' +
+  'Object.defineProperty(proto,prop,{configurable:true,enumerable:d.enumerable,get:d.get,set:nm(function(v){d.set.call(this,rw(String(v)));},d.set)});}catch(e){}}' +
   'pp(HTMLImageElement.prototype,"src");pp(HTMLScriptElement.prototype,"src");pp(HTMLLinkElement.prototype,"href");' +
   'pp(HTMLIFrameElement.prototype,"src");pp(HTMLSourceElement.prototype,"src");pp(HTMLMediaElement.prototype,"src");' +
-  'var sa=Element.prototype.setAttribute;Element.prototype.setAttribute=function(n,v){if((n==="src"||n==="href"||n==="poster")&&typeof v==="string")v=rw(v);return sa.call(this,n,v);};' +
+  'var sa=Element.prototype.setAttribute;Element.prototype.setAttribute=nm(function(n,v){if((n==="src"||n==="href"||n==="poster")&&typeof v==="string")v=rw(v);return sa.call(this,n,v);},sa);' +
   'try{var cs=CSSStyleDeclaration.prototype;["backgroundImage","background"].forEach(function(p){var d=Object.getOwnPropertyDescriptor(cs,p);' +
-  'if(d&&d.set){Object.defineProperty(cs,p,{configurable:true,enumerable:d.enumerable,get:d.get,set:function(v){d.set.call(this,rwt(v));}});}});' +
-  'var sp=cs.setProperty;cs.setProperty=function(n,v,pr){if(/background|image/i.test(n)&&typeof v==="string")v=rwt(v);return sp.call(this,n,v,pr);};}catch(e){}' +
-  'if(navigator.sendBeacon){var sb=navigator.sendBeacon;navigator.sendBeacon=function(u,d){return sb.call(navigator,rw(String(u)),d);};}' +
+  'if(d&&d.set){Object.defineProperty(cs,p,{configurable:true,enumerable:d.enumerable,get:d.get,set:nm(function(v){d.set.call(this,rwt(v));},d.set)});}});' +
+  'var sp=cs.setProperty;cs.setProperty=nm(function(n,v,pr){if(/background|image/i.test(n)&&typeof v==="string")v=rwt(v);return sp.call(this,n,v,pr);},sp);}catch(e){}' +
+  'if(navigator.sendBeacon){var sb=navigator.sendBeacon;navigator.sendBeacon=nm(function(u,d){return sb.call(navigator,rw(String(u)),d);},sb);}' +
   '}catch(e){}})();';
 
 function fixHtml(body) {
   body = body.replace(/<meta[^>]+http-equiv=["']?content-security-policy["']?[^>]*>/ig, '')
              .replace(/\sintegrity=("[^"]*"|'[^']*')/ig, '');
-  var inj = '<script>' + CLIENT_PATCH.replace('__DOMS__', JSON.stringify(cfg.domains || [])) + '</script>';
+  var inj = '<style>yt-debug-watermark{display:none!important}</style><script>' + CLIENT_PATCH.replace('__DOMS__', JSON.stringify(cfg.domains || [])) + '</script>';
   if (/<head[^>]*>/i.test(body)) return body.replace(/<head[^>]*>/i, function (m) { return m + inj; });
   return inj + body;
 }
+
+// ---- UMP (YouTube SABR) answers: which part types did the video server send, and what is the Stream Protection status ----
+var SPS_NAMES = { 1: 'OK', 2: 'ATTESTATION_PENDING', 3: 'ATTESTATION_REQUIRED' };
+var lastSps = '';
+function pbVarints(a) {
+  var o = {}, i = 0;
+  function rv() {
+    var v = 0, mul = 1, b;
+    do { b = a[i++]; if (b === undefined) return null; v += (b & 0x7f) * mul; mul *= 128; } while (b & 0x80);
+    return v;
+  }
+  while (i < a.length) {
+    var tag = rv();
+    if (tag === null) break;
+    var wt = tag & 7, fno = Math.floor(tag / 8);
+    if (wt === 0) { var v = rv(); if (v === null) break; o[fno] = v; }
+    else if (wt === 2) { var l = rv(); if (l === null) break; i += l; }
+    else break;
+  }
+  return o;
+}
+function umpVarint(a) {
+  var n = a.length;
+  if (n === 1) return a[0];
+  if (n === 2) return (a[0] & 0x3f) + 64 * a[1];
+  if (n === 3) return (a[0] & 0x1f) + 32 * (a[1] + 256 * a[2]);
+  if (n === 4) return (a[0] & 0x0f) + 16 * (a[1] + 256 * (a[2] + 256 * a[3]));
+  return a[1] + 256 * (a[2] + 256 * (a[3] + 256 * a[4]));
+}
+function asciiOf(arr) { return String.fromCharCode.apply(null, arr).replace(/[^\x20-\x7e]/g, '.'); }
+// Streaming: payloads of media parts are skipped without being buffered; only a few small parts are captured.
+function umpScanner() {
+  var st = 0, vb = [], need = 0, type = 0, left = 0, cap = null, bad = false;
+  var counts = {}, order = [], sps = '', err = '', redir = '';
+  function part() {
+    if (!counts[type]) { counts[type] = 0; order.push(type); }
+    counts[type]++;
+    if (!cap) return;
+    if (type === 58) {
+      var f = pbVarints(cap);
+      var s = f[1] === undefined ? 0 : f[1], r = f[2] || 0;
+      sps = s + (r ? '/' + r : '');
+      status.sps = (SPS_NAMES[s] || ('status ' + s)) + (r ? ' retries=' + r : '');
+      if (sps !== lastSps) { lastSps = sps; log('web STREAM-PROTECTION', status.sps); }
+    } else if (type === 44) {
+      err = 'SABR_ERROR ' + asciiOf(cap.slice(2, 2 + cap[1]));
+    } else if (type === 43) {
+      redir = asciiOf(cap.slice(0, 100));
+    }
+  }
+  function push(chunk) {
+    if (bad) return;
+    var i = 0, n = chunk.length;
+    while (i < n) {
+      if (st === 2) {
+        var take = left < n - i ? left : n - i;
+        if (cap) { for (var k = 0; k < take; k++) cap.push(chunk[i + k]); }
+        left -= take;
+        i += take;
+        if (left === 0) { part(); st = 0; }
+        continue;
+      }
+      var b = chunk[i++];
+      if (!vb.length) need = b < 128 ? 1 : b < 192 ? 2 : b < 224 ? 3 : b < 240 ? 4 : 5;
+      vb.push(b);
+      if (vb.length < need) continue;
+      var v = umpVarint(vb);
+      vb = [];
+      if (st === 0) {
+        type = v;
+        if (v > 250) { bad = true; return; }
+        st = 1;
+      } else {
+        left = v;
+        cap = ((type === 58 || type === 44 || type === 43) && v <= 512) ? [] : null;
+        if (v === 0) { part(); st = 0; } else st = 2;
+      }
+    }
+  }
+  function done() {
+    var parts = order.map(function (t) { return t + (counts[t] > 1 ? 'x' + counts[t] : ''); }).join(',');
+    return 'parts=' + parts + ((st !== 0 || vb.length) ? '+cut' : '') + (bad ? ' notump' : '') +
+      (sps ? ' sps=' + sps : '') + (err ? ' ' + err : '') + (redir ? ' redirect=' + redir : '');
+  }
+  return { push: push, done: done };
+}
+
+function playerInfo(text) {
+  try {
+    var j = JSON.parse(text);
+    var pr = j.playerResponse || j;
+    var sd = pr.streamingData || {};
+    var all = [].concat(sd.formats || [], sd.adaptiveFormats || []);
+    var u = 0, c = 0, n = 0;
+    for (var i = 0; i < all.length; i++) { if (all[i].url) u++; else if (all[i].signatureCipher || all[i].cipher) c++; else n++; }
+    return 'fmts=' + all.length + ' url=' + u + ' cipher=' + c + ' none=' + n + ' sabrUrl=' + (sd.serverAbrStreamingUrl ? 'yes' : 'no');
+  } catch (e) { return 'fmts=? (' + e.message + ')'; }
+}
+
+// Experiment: remove the SABR streaming URL so the player falls back to classic per-format URLs (no Stream Protection).
+function dropSabr(text) {
+  var info = playerInfo(text);
+  var re1 = /,"serverAbrStreamingUrl"\s*:\s*"(?:[^"\\]|\\.)*"/;
+  var re2 = /"serverAbrStreamingUrl"\s*:\s*"(?:[^"\\]|\\.)*"\s*,/;
+  var out;
+  if (re1.test(text)) out = text.replace(re1, '');
+  else if (re2.test(text)) out = text.replace(re2, '');
+  else return text;
+  var m = info.match(/url=(\d+) cipher=(\d+)/);
+  if (m && (+m[1] + +m[2]) === 0) { log('web NOSABR skipped (no direct formats):', info); return text; }
+  log('web NOSABR removed serverAbrStreamingUrl:', info);
+  return out;
+}
+
+// Responses that must reach the page byte-for-byte (attestation scripts / tokens).
+function isRaw(host, path) { return host === 'jnn-pa.googleapis.com' || /^\/js\/th\//.test(path); }
 
 function webError(res, code, msg) {
   if (res.headersSent) { try { res.end(); } catch (e) {} return; }
@@ -628,6 +756,8 @@ function handleWeb(req, res) {
   h['accept-encoding'] = 'identity';
   if (h.origin) h.origin = toUpstream(h.origin, base);
   if (h.referer) h.referer = toUpstream(h.referer, base);
+  // The browser thinks everything is same-origin (127.0.0.1); tell the real servers what a real youtube.com page would.
+  if (h['sec-fetch-site'] && h['sec-fetch-mode'] !== 'navigate') h['sec-fetch-site'] = /(^|\.)youtube\.com$/.test(host) ? 'same-origin' : 'cross-site';
 
   var ckey = (req.method === 'GET' && /^\/(s|yts)\//.test(path)) ? host + path : null;
   if (ckey && wcache[ckey]) {
@@ -641,7 +771,7 @@ function handleWeb(req, res) {
     host: '127.0.0.1', port: ports.relay || cfg.sniPort || 8443, servername: host, method: req.method, path: path,
     headers: h, agent: agentFor(host), rejectUnauthorized: !cfg.upstreamInsecure
   }, function (ur) {
-    log('web', req.method, ur.statusCode, host + path.slice(0, 70));
+    if (!/^(i\.ytimg\.com|yt3\.ggpht\.com)$/.test(host) && !/^\/(api\/stats\/|youtubei\/v1\/log_event|generate_204|videoplayback)/.test(path)) log('web', req.method, ur.statusCode, host + path.slice(0, 70));
     var rh = {};
     for (var k2 in ur.headers) { if (!HOP[k2]) rh[k2] = ur.headers[k2]; }
     delete rh['content-security-policy']; delete rh['content-security-policy-report-only'];
@@ -656,9 +786,11 @@ function handleWeb(req, res) {
       if (/googlevideo\.com$/.test(host) && /^\/videoplayback/.test(path)) {
         var nb = 0;
         var cap = bAlloc(0);
-        ur.on('data', function (d) { nb += d.length; if (cap.length < 96) cap = Buffer.concat([cap, d]).slice(0, 96); });
+        var scan = /yt-ump/i.test(ct) ? umpScanner() : null;
+        ur.on('data', function (d) { nb += d.length; if (cap.length < 96) cap = Buffer.concat([cap, d]).slice(0, 96); if (scan) scan.push(d); });
         ur.on('end', function () {
           log('web GV done', req.method, ur.statusCode, ct.slice(0, 40), 'bytes=' + nb, 'cl=' + (ur.headers['content-length'] || '-'), 'reqlen=' + (req.headers['content-length'] || '-'));
+          if (scan) log('web UMP', scan.done());
           if (nb <= 200) {
             // tiny UMP answers are almost certainly an error/redirect part: show them
             var qn = (path.split('?')[1] || '').split('&').map(function (kv) { return kv.split('=')[0]; }).join(',');
@@ -685,12 +817,15 @@ function handleWeb(req, res) {
           var ps = text.match(/"playabilityStatus"\s*:\s*\{\s*"status"\s*:\s*"([A-Z_]+)"(?:[^}]*?"reason"\s*:\s*"([^"]*)")?/);
           log('web PLAYER', ps ? ps[1] + (ps[2] ? ' | ' + ps[2] : '') : 'no playabilityStatus', '| streamingData=' + (/"streamingData"/.test(text) ? 'yes' : 'no'), '| len=' + text.length);
           var gv = text.match(/https?:\\?\/\\?\/[a-z0-9.-]*googlevideo\.com[^"\s]{0,70}/i);
+          log('web PLAYER-FORMATS', playerInfo(text));
           log('web PLAYER-URLS gv=' + (text.match(/googlevideo\.com/g) || []).length, 'cipher=' + /signatureCipher/.test(text), 'sabr=' + /serverAbrStreamingUrl/.test(text), 'first=' + (gv ? gv[0] : '-'));
         }
       } catch (e) {}
+      if (cfg.noSabr && /^\/youtubei\/v1\/(player|reel\/reel_item_watch)/.test(path)) text = dropSabr(text);
+      if (host === 'jnn-pa.googleapis.com') log('web WAA', path.slice(0, 50), 'len=' + text.length);
       // Player responses keep their original googlevideo URLs: the player validates the host, and the
       // client patch (fetch/XHR/src) already sends those requests through this proxy.
-      if (!/^\/youtubei\/v1\/player/.test(path)) text = rewriteText(text, hostport);
+      if (!/^\/youtubei\/v1\/player/.test(path) && !isRaw(host, path)) text = rewriteText(text, hostport);
       if (/text\/html/i.test(ct)) text = fixHtml(text);
       var out = bFromStr(text, 'utf8');
       delete rh['content-encoding']; delete rh['content-length'];
