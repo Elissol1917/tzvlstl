@@ -27,11 +27,11 @@ var cfg = {
     'googleapis.com', 'gstatic.com', 'google.com', 'googleusercontent.com'],
   upstreamDns: ['8.8.8.8', '1.1.1.1']
 };
-var status = { version: '0.3.14', started: new Date().toISOString(), noSabr: false, sps: '-', web: 'starting', relay: 'starting', dns: 'off', https: 'off', http: 'off', setup: 'starting', vpn: 'not configured', saved: '-', mode: 'local', answerIp: '127.0.0.1', lanIps: [] };
+var status = { version: '0.3.15', started: new Date().toISOString(), noSabr: false, sps: '-', web: 'starting', relay: 'starting', dns: 'off', https: 'off', http: 'off', setup: 'starting', vpn: 'not configured', saved: '-', mode: 'local', answerIp: '127.0.0.1', lanIps: [] };
 var handles = [];
 var started = false;
 // Ports actually bound (may differ from cfg.* if the preferred one was busy).
-var VERSION = '0.3.14';
+var VERSION = '0.3.15';
 var ports = { setup: 0, relay: 0, web: 0 };
 var PORT_TRIES = 30;
 
@@ -727,19 +727,31 @@ function pbShape(buf, depth) {
   return out.join(' ');
 }
 
-// Experiment: remove the SABR streaming URL so the player falls back to classic per-format URLs (no Stream Protection).
+// Remove the SABR streaming URL and every format that can only be fetched through SABR (no direct url),
+// so the player has to use the classic per-format urls (no Stream Protection).
 function dropSabr(text) {
+  var j;
+  try { j = JSON.parse(text); } catch (e) { log('web NOSABR skipped (not json):', e.message); return text; }
+  var pr = j.playerResponse || j;
+  var sd = pr && pr.streamingData;
+  if (!sd) return text;
   var info = playerInfo(text);
-  var re1 = /,"serverAbrStreamingUrl"\s*:\s*"(?:[^"\\]|\\.)*"/;
-  var re2 = /"serverAbrStreamingUrl"\s*:\s*"(?:[^"\\]|\\.)*"\s*,/;
-  var out;
-  if (re1.test(text)) out = text.replace(re1, '');
-  else if (re2.test(text)) out = text.replace(re2, '');
-  else return text;
-  var m = info.match(/url=(\d+) cipher=(\d+)/);
-  if (m && (+m[1] + +m[2]) === 0) { log('web NOSABR skipped (no direct formats):', info); return text; }
-  log('web NOSABR removed serverAbrStreamingUrl:', info);
-  return out;
+  var had = !!sd.serverAbrStreamingUrl;
+  var keep = [], kept = 0, lost = 0;
+  ['formats', 'adaptiveFormats'].forEach(function (k) {
+    if (!sd[k]) return;
+    var a = [];
+    for (var i = 0; i < sd[k].length; i++) {
+      var f = sd[k][i];
+      if (f.url || f.signatureCipher || f.cipher) { a.push(f); kept++; keep.push('itag' + f.itag + ' ' + String(f.mimeType || '').split(';')[0] + ' ' + (f.qualityLabel || f.quality || '') + (f.audioQuality ? ' ' + f.audioQuality : '')); }
+      else lost++;
+    }
+    sd[k] = a;
+  });
+  if (!kept) { log('web NOSABR skipped (no direct formats):', info); return text; }
+  delete sd.serverAbrStreamingUrl;
+  log('web NOSABR removed sabr=' + had + ' kept=' + kept + ' dropped=' + lost + ' | ' + keep.join(', '));
+  return JSON.stringify(j);
 }
 
 // Responses that must reach the page byte-for-byte (attestation scripts / tokens).
