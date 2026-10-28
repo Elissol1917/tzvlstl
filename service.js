@@ -27,11 +27,11 @@ var cfg = {
     'googleapis.com', 'gstatic.com', 'google.com', 'googleusercontent.com'],
   upstreamDns: ['8.8.8.8', '1.1.1.1']
 };
-var status = { version: '0.3.17', started: new Date().toISOString(), noSabr: false, sps: '-', web: 'starting', relay: 'starting', dns: 'off', https: 'off', http: 'off', setup: 'starting', vpn: 'not configured', saved: '-', mode: 'local', answerIp: '127.0.0.1', lanIps: [] };
+var status = { version: '0.3.18', started: new Date().toISOString(), noSabr: false, sps: '-', web: 'starting', relay: 'starting', dns: 'off', https: 'off', http: 'off', setup: 'starting', vpn: 'not configured', saved: '-', mode: 'local', answerIp: '127.0.0.1', lanIps: [] };
 var handles = [];
 var started = false;
 // Ports actually bound (may differ from cfg.* if the preferred one was busy).
-var VERSION = '0.3.17';
+var VERSION = '0.3.18';
 var ports = { setup: 0, relay: 0, web: 0 };
 var PORT_TRIES = 30;
 
@@ -760,20 +760,21 @@ function dropSabr(text) {
 var VR_UA = 'com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip';
 var TV_UA = 'Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version';
 var VR_CLIENTS = [
-  { name: 'vr', id: '28', ver: '1.60.19', ua: VR_UA, ctx: { clientName: 'ANDROID_VR', clientVersion: '1.60.19', deviceMake: 'Oculus', deviceModel: 'Quest 3', androidSdkVersion: 32, userAgent: VR_UA, osName: 'Android', osVersion: '12L', hl: 'en', timeZone: 'UTC', utcOffsetMinutes: 0 } },
-  { name: 'vr2', id: '28', ver: '1.65.10', ua: 'com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 14; eureka-user Build/UP1A.231005.007) gzip', ctx: { clientName: 'ANDROID_VR', clientVersion: '1.65.10', deviceMake: 'Oculus', deviceModel: 'Quest 3', androidSdkVersion: 34, osName: 'Android', osVersion: '14', hl: 'en', timeZone: 'UTC', utcOffsetMinutes: 0 } },
   { name: 'tvsimply', id: '75', ver: '1.0', ua: TV_UA, ctx: { clientName: 'TVHTML5_SIMPLY', clientVersion: '1.0', hl: 'en', timeZone: 'UTC', utcOffsetMinutes: 0 } },
-  { name: 'tvembed', id: '85', ver: '2.0', ua: TV_UA, ctx: { clientName: 'TVHTML5_SIMPLY_EMBEDDED_PLAYER', clientVersion: '2.0', hl: 'en', timeZone: 'UTC', utcOffsetMinutes: 0 }, third: true }
+  { name: 'tvold', id: '7', ver: '5.20150304', ua: TV_UA, ctx: { clientName: 'TVHTML5', clientVersion: '5.20150304', hl: 'en', timeZone: 'UTC', utcOffsetMinutes: 0 } },
+  { name: 'vr', id: '28', ver: '1.60.19', ua: VR_UA, ctx: { clientName: 'ANDROID_VR', clientVersion: '1.60.19', deviceMake: 'Oculus', deviceModel: 'Quest 3', androidSdkVersion: 32, userAgent: VR_UA, osName: 'Android', osVersion: '12L', hl: 'en', timeZone: 'UTC', utcOffsetMinutes: 0 } }
 ];
-function vrFetch(spec, videoId, cb) {
+function vrFetch(spec, videoId, auth, cb) {
   var done = false;
   function fin(e, j) { if (done) return; done = true; cb(e, j); }
   var o = { context: { client: spec.ctx }, videoId: videoId, contentCheckOk: true, racyCheckOk: true };
   if (spec.third) { o.context.thirdParty = { embedUrl: 'https://www.youtube.com/watch?v=' + videoId }; o.playbackContext = { contentPlaybackContext: { html5Preference: 'HTML5_PREF_WANTS' } }; }
   var body = JSON.stringify(o);
+  var hdrs = { host: 'www.youtube.com', 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), 'user-agent': spec.ua, 'x-youtube-client-name': spec.id, 'x-youtube-client-version': spec.ver, 'accept-encoding': 'identity' };
+  if (auth) { hdrs.authorization = auth.authorization; if (auth['x-goog-visitor-id']) hdrs['x-goog-visitor-id'] = auth['x-goog-visitor-id']; }
   var r = https.request({
     host: '127.0.0.1', port: ports.relay || cfg.sniPort || 8443, servername: 'www.youtube.com', method: 'POST', path: '/youtubei/v1/player?prettyPrint=false',
-    headers: { host: 'www.youtube.com', 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), 'user-agent': spec.ua, 'x-youtube-client-name': spec.id, 'x-youtube-client-version': spec.ver, 'accept-encoding': 'identity' },
+    headers: hdrs,
     agent: agentFor('www.youtube.com'), rejectUnauthorized: !cfg.upstreamInsecure
   }, function (ur) {
     var ch = [];
@@ -788,7 +789,7 @@ function vrFetch(spec, videoId, cb) {
   r.on('error', function (e) { fin(e); });
   r.end(body);
 }
-function vrMerge(text, cb) {
+function vrMerge(text, reqh, cb) {
   var j, pr, vid;
   try { j = JSON.parse(text); pr = j.playerResponse || j; vid = pr.videoDetails && pr.videoDetails.videoId; } catch (e) {}
   if (!vid || !pr.streamingData || ENV.TV_VLESS_NO_VR) { cb(dropSabr(text)); return; }
@@ -796,7 +797,7 @@ function vrMerge(text, cb) {
   function next() {
     if (idx >= VR_CLIENTS.length || Date.now() - t0 > 11000) { log('web VR all clients failed, plain fallback'); cb(dropSabr(text)); return; }
     var spec = VR_CLIENTS[idx++];
-    vrFetch(spec, vid, function (err, v) {
+    vrFetch(spec, vid, (reqh && reqh.authorization) ? reqh : null, function (err, v) {
       try {
         if (err) throw err;
         var ps = v.playabilityStatus && v.playabilityStatus.status;
@@ -804,7 +805,7 @@ function vrMerge(text, cb) {
         var all = [].concat(vs.formats || [], vs.adaptiveFormats || []);
         var vf = all.filter(function (f) { return f.url; });
         var tall = vf.filter(function (f) { return f.height > 360; }).length;
-        log('web VR try ' + spec.name + ': ' + ps + (v.playabilityStatus && v.playabilityStatus.reason ? ' (' + String(v.playabilityStatus.reason).slice(0, 60) + ')' : '') + ' total=' + all.length + ' direct=' + vf.length + ' above360=' + tall + ' cipher=' + all.filter(function (f) { return f.signatureCipher || f.cipher; }).length + ' sabr=' + !!vs.serverAbrStreamingUrl + ' hls=' + !!vs.hlsManifestUrl);
+        log('web VR try ' + spec.name + (reqh && reqh.authorization ? '+auth' : '') + ': ' + ps + (v.playabilityStatus && v.playabilityStatus.reason ? ' (' + String(v.playabilityStatus.reason).slice(0, 60) + ')' : '') + ' total=' + all.length + ' direct=' + vf.length + ' above360=' + tall + ' cipher=' + all.filter(function (f) { return f.signatureCipher || f.cipher; }).length + ' sabr=' + !!vs.serverAbrStreamingUrl + ' hls=' + !!vs.hlsManifestUrl);
         if (ps !== 'OK' || !tall) throw new Error('not useful');
         var sd = pr.streamingData, have = {};
         var nf = (vs.formats || []).filter(function (f) { return f.url; });
@@ -953,7 +954,7 @@ function handleWeb(req, res) {
         if (wcacheKeys.length > 30) delete wcache[wcacheKeys.shift()];
       }
       };
-      if (isPl) vrMerge(text, function (t2) { text = t2; finish(); }); else finish();
+      if (isPl) vrMerge(text, h, function (t2) { text = t2; finish(); }); else finish();
     });
   });
   up.setTimeout(45000, function () { up.abort(); });
