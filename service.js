@@ -27,11 +27,11 @@ var cfg = {
     'googleapis.com', 'gstatic.com', 'google.com', 'googleusercontent.com'],
   upstreamDns: ['8.8.8.8', '1.1.1.1']
 };
-var status = { version: '0.3.18', started: new Date().toISOString(), noSabr: false, sps: '-', web: 'starting', relay: 'starting', dns: 'off', https: 'off', http: 'off', setup: 'starting', vpn: 'not configured', saved: '-', mode: 'local', answerIp: '127.0.0.1', lanIps: [] };
+var status = { version: '0.3.19', started: new Date().toISOString(), noSabr: false, sps: '-', web: 'starting', relay: 'starting', dns: 'off', https: 'off', http: 'off', setup: 'starting', vpn: 'not configured', saved: '-', mode: 'local', answerIp: '127.0.0.1', lanIps: [] };
 var handles = [];
 var started = false;
 // Ports actually bound (may differ from cfg.* if the preferred one was busy).
-var VERSION = '0.3.18';
+var VERSION = '0.3.19';
 var ports = { setup: 0, relay: 0, web: 0 };
 var PORT_TRIES = 30;
 
@@ -771,7 +771,7 @@ function vrFetch(spec, videoId, auth, cb) {
   if (spec.third) { o.context.thirdParty = { embedUrl: 'https://www.youtube.com/watch?v=' + videoId }; o.playbackContext = { contentPlaybackContext: { html5Preference: 'HTML5_PREF_WANTS' } }; }
   var body = JSON.stringify(o);
   var hdrs = { host: 'www.youtube.com', 'content-type': 'application/json', 'content-length': Buffer.byteLength(body), 'user-agent': spec.ua, 'x-youtube-client-name': spec.id, 'x-youtube-client-version': spec.ver, 'accept-encoding': 'identity' };
-  if (auth) { hdrs.authorization = auth.authorization; if (auth['x-goog-visitor-id']) hdrs['x-goog-visitor-id'] = auth['x-goog-visitor-id']; }
+  if (auth) { ['authorization', 'cookie', 'x-goog-visitor-id', 'x-goog-authuser'].forEach(function (k) { if (auth[k]) hdrs[k] = auth[k]; }); }
   var r = https.request({
     host: '127.0.0.1', port: ports.relay || cfg.sniPort || 8443, servername: 'www.youtube.com', method: 'POST', path: '/youtubei/v1/player?prettyPrint=false',
     headers: hdrs,
@@ -797,7 +797,7 @@ function vrMerge(text, reqh, cb) {
   function next() {
     if (idx >= VR_CLIENTS.length || Date.now() - t0 > 11000) { log('web VR all clients failed, plain fallback'); cb(dropSabr(text)); return; }
     var spec = VR_CLIENTS[idx++];
-    vrFetch(spec, vid, (reqh && reqh.authorization) ? reqh : null, function (err, v) {
+    vrFetch(spec, vid, (reqh && (reqh.authorization || reqh.cookie)) ? reqh : null, function (err, v) {
       try {
         if (err) throw err;
         var ps = v.playabilityStatus && v.playabilityStatus.status;
@@ -805,7 +805,7 @@ function vrMerge(text, reqh, cb) {
         var all = [].concat(vs.formats || [], vs.adaptiveFormats || []);
         var vf = all.filter(function (f) { return f.url; });
         var tall = vf.filter(function (f) { return f.height > 360; }).length;
-        log('web VR try ' + spec.name + (reqh && reqh.authorization ? '+auth' : '') + ': ' + ps + (v.playabilityStatus && v.playabilityStatus.reason ? ' (' + String(v.playabilityStatus.reason).slice(0, 60) + ')' : '') + ' total=' + all.length + ' direct=' + vf.length + ' above360=' + tall + ' cipher=' + all.filter(function (f) { return f.signatureCipher || f.cipher; }).length + ' sabr=' + !!vs.serverAbrStreamingUrl + ' hls=' + !!vs.hlsManifestUrl);
+        log('web VR try ' + spec.name + (reqh && reqh.authorization ? '+bearer' : '') + (reqh && reqh.cookie ? '+cookie' : '') + ': ' + ps + (v.playabilityStatus && v.playabilityStatus.reason ? ' (' + String(v.playabilityStatus.reason).slice(0, 60) + ')' : '') + ' total=' + all.length + ' direct=' + vf.length + ' above360=' + tall + ' cipher=' + all.filter(function (f) { return f.signatureCipher || f.cipher; }).length + ' sabr=' + !!vs.serverAbrStreamingUrl + ' hls=' + !!vs.hlsManifestUrl);
         if (ps !== 'OK' || !tall) throw new Error('not useful');
         var sd = pr.streamingData, have = {};
         var nf = (vs.formats || []).filter(function (f) { return f.url; });
